@@ -1,0 +1,125 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="Eslint" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyAugmentAssignmentInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="fasttext" />
+          <option value="xgboost" />
+          <option value="lightgbm" />
+          <option value="torch-geometric" />
+          <option value="pygraphviz" />
+          <option value="lightning" />
+          <option value="ipywidgets" />
+          <option value="bitsandbytes" />
+          <option value="gptqmodel" />
+          <option value="optimum" />
+          <option value="guardrails-ai" />
+          <option value="aiohttp" />
+          <option value="aiosignal" />
+          <option value="anyio" />
+          <option value="appnope" />
+          <option value="asttokens" />
+          <option value="asyncclick" />
+          <option value="asyncio" />
+          <option value="attrs" />
+          <option value="bokeh" />
+          <option value="certifi" />
+          <option value="charset-normalizer" />
+          <option value="click" />
+          <option value="comm" />
+          <option value="contourpy" />
+          <option value="cycler" />
+          <option value="dataclass-wizard" />
+          <option value="debugpy" />
+          <option value="decorator" />
+          <option value="executing" />
+          <option value="filelock" />
+          <option value="fonttools" />
+          <option value="frozenlist" />
+          <option value="fsspec" />
+          <option value="huggingface-hub" />
+          <option value="idna" />
+          <option value="ipykernel" />
+          <option value="ipython" />
+          <option value="jedi" />
+          <option value="Jinja2" />
+          <option value="joblib" />
+          <option value="jupyter_client" />
+          <option value="jupyter_core" />
+          <option value="kiwisolver" />
+          <option value="MarkupSafe" />
+          <option value="matplotlib" />
+          <option value="matplotlib-inline" />
+          <option value="mpmath" />
+          <option value="multidict" />
+          <option value="nest-asyncio" />
+          <option value="networkx" />
+          <option value="numpy" />
+          <option value="orjson" />
+          <option value="packaging" />
+          <option value="pandas" />
+          <option value="parso" />
+          <option value="perspective" />
+          <option value="pexpect" />
+          <option value="pillow" />
+          <option value="platformdirs" />
+          <option value="prompt-toolkit" />
+          <option value="psutil" />
+          <option value="ptyprocess" />
+          <option value="pure-eval" />
+          <option value="Pygments" />
+          <option value="pyparsing" />
+          <option value="python-dateutil" />
+          <option value="python-dotenv" />
+          <option value="pytz" />
+          <option value="PyYAML" />
+          <option value="pyzmq" />
+          <option value="regex" />
+          <option value="requests" />
+          <option value="safetensors" />
+          <option value="scikit-learn" />
+          <option value="scipy" />
+          <option value="seaborn" />
+          <option value="sentence-transformers" />
+          <option value="six" />
+          <option value="sniffio" />
+          <option value="stack-data" />
+          <option value="sympy" />
+          <option value="tdqm" />
+          <option value="threadpoolctl" />
+          <option value="tokenizers" />
+          <option value="torch" />
+          <option value="tornado" />
+          <option value="tqdm" />
+          <option value="traitlets" />
+          <option value="transformers" />
+          <option value="typing_extensions" />
+          <option value="tzdata" />
+          <option value="urllib3" />
+          <option value="wcwidth" />
+          <option value="wordcloud" />
+          <option value="xyzservices" />
+          <option value="yarl" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyStubPackagesAdvertiser" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="pandas" />
+          <option value="scipy" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyStubPackagesCompatibilityInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredStubPackages">
+        <list>
+          <option value="pandas-stubs~=2.2.3" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
