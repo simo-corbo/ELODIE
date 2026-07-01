@@ -1,5 +1,7 @@
 # The ELODIE Architecture: Engineering Logical Oracles for Deterministic Inference Evaluation
 
+
+![schema.pdf](./schema.pdf)
 ## 1. Introduction and Motivation
 
 In the domain of automated Software Engineering (SE) and testing, evaluating Large Language Models (LLMs) against strict safety and policy constraints—such as SLEEC (Social, Legal, Ethical, Empathetic, and Cultural) requirements—presents a fundamental **Test Oracle Problem**.
