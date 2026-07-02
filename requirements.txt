@@ -1,3 +1,13 @@
+# Phase 1 — prompt generation (Gemini via LangChain)
 langchain-core
 langchain-google-genai
 python-dotenv
+
+# Phases 2/4/5 — DeBERTa NLI oracle & gate evaluation
+transformers
+torch
+
+# System Under Test clients (Phase 3) + config
+openai          # Gemini / DeepSeek OpenAI-compatible clients
+requests        # local (vLLM / llama.cpp) client
+pyyaml          # config/elodie.yaml

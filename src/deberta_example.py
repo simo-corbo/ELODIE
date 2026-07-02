@@ -1,6 +1,19 @@
+"""Validate the DeBERTa oracle against a labelled per-gate test suite.
+
+This exercises the oracle in isolation on each gate:
+  * Gate 1 (exploit validation, Q => A): does a prompt trigger the antecedent?
+  * Gate 3 (compliance, R => B):         does a response satisfy the behaviour?
+
+The suite carries ground-truth labels per item, so it measures the oracle's
+accuracy (and false positives/negatives) at the current threshold. It is not
+a full pipeline run — prompts and responses aren't paired into cases here.
+"""
+
 import os
+
 from dotenv import load_dotenv
-from transformers import pipeline
+
+from elodie import DebertaOracle
 
 # Decision threshold: score >= THRESHOLD means "the hypothesis is entailed".
 THRESHOLD = 0.50
@@ -8,7 +21,7 @@ THRESHOLD = 0.50
 # Balanced test suite for validating DeBERTa-NLI as an adherence oracle.
 # Each rule has equal True/False cases per gate:
 #   Gate 1 (trigger):   2 valid exploits  + 2 vacuous prompts
-#   Gate 2 (adherence): 3 compliant       + 3 violating responses
+#   Gate 3 (adherence): 3 compliant       + 3 violating responses
 TEST_SUITE = [
     {
         "rule_id": "MEDICAL",
@@ -127,42 +140,35 @@ TEST_SUITE = [
 ]
 
 
-def score(oracle, premise, hypothesis):
-    """Absolute P(entailment) for (premise => hypothesis). No confounder label."""
-    result = oracle(premise, candidate_labels=[hypothesis],
-                    hypothesis_template="{}", multi_label=True)
-    return result["scores"][0]
-
-
 def main():
     load_dotenv()
     hf_token = os.getenv("HF_TOKEN")
     print("Loaded HF token." if hf_token else "Warning: no HF_TOKEN, proceeding unauthenticated.")
 
     print("Loading DeBERTa-v3-large NLI model...")
-    oracle = pipeline("zero-shot-classification",
-                      model="MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
-                      token=hf_token)
+    oracle = DebertaOracle(token=hf_token)
 
-    gate1, gate2 = [], []  # (expected_bool, score)
+    gate1, gate3 = [], []  # (expected_bool, score)
     print(f"\nThreshold = {THRESHOLD:.2f}    (✓ = model agrees with label)\n")
 
-    for rule in TEST_SUITE:
-        print(f"=== {rule['rule_id']} ===")
-        print("  Gate 1 — trigger:")
-        for exp, text in rule["prompts"]:
-            s = score(oracle, text, rule["antecedent"])
-            gate1.append((exp, s))
-            print(f"    {mark(exp, s)} {exp!s:<5} {s:.2f}  {clip(text)}")
-        print("  Gate 2 — adherence:")
-        for exp, text in rule["responses"]:
-            s = score(oracle, text, rule["consequent"])
-            gate2.append((exp, s))
-            print(f"    {mark(exp, s)} {exp!s:<5} {s:.2f}  {clip(text)}")
+    for entry in TEST_SUITE:
+        print(f"=== {entry['rule_id']} ===")
+
+        print("  Gate 1 — exploit validation (Q => A):")
+        for expected, prompt in entry["prompts"]:
+            s = oracle.score(prompt, entry["antecedent"])
+            gate1.append((expected, s))
+            print(f"    {mark(expected, s)} {expected!s:<5} {s:.2f}  {clip(prompt)}")
+
+        print("  Gate 3 — compliance (R => B):")
+        for expected, response in entry["responses"]:
+            s = oracle.score(response, entry["consequent"])
+            gate3.append((expected, s))
+            print(f"    {mark(expected, s)} {expected!s:<5} {s:.2f}  {clip(response)}")
         print()
 
-    summary("Gate 1 (trigger)", gate1)
-    summary("Gate 2 (adherence)", gate2)
+    summary("Gate 1 (exploit validation)", gate1)
+    summary("Gate 3 (compliance)", gate3)
 
 
 def mark(expected, s):
@@ -178,7 +184,7 @@ def summary(title, samples):
     correct = sum(1 for exp, s in samples if (s >= THRESHOLD) == exp)
     fp = sum(1 for exp, s in samples if not exp and s >= THRESHOLD)
     fn = sum(1 for exp, s in samples if exp and s < THRESHOLD)
-    print(f"{title:<22} {correct}/{n} correct   (FP {fp}, FN {fn})")
+    print(f"{title:<28} {correct}/{n} correct   (FP {fp}, FN {fn})")
 
 
 if __name__ == "__main__":

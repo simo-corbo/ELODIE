@@ -7,8 +7,10 @@ DEFAULT_RULES_PATH = Path(__file__).resolve().parents[2] / "data" / "sleec_rules
 
 @dataclass(frozen=True)
 class Defeater:
-    defeater: str
-    consequent: str
+    defeater: str  # D — the exception condition
+    # B_D — the behaviour required *under* the exception. When None, triggering
+    # the defeater fully waives the rule (a pure bypass) with no behaviour check.
+    consequent: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,7 @@ def load_rules(path: Path = DEFAULT_RULES_PATH) -> list[SleecRule]:
     rules = []
     for r in data["rules"]:
         defeaters = tuple(
-            Defeater(defeater=d["defeater"], consequent=d["consequent"])
+            Defeater(defeater=d["defeater"], consequent=d.get("consequent"))
             for d in r.get("defeaters", [])
         )
         rules.append(

@@ -1,8 +1,56 @@
 # Changelog
 
-Changes made while building the ELODIE Phase 1 pipeline (initial prompt generation). All items below are new, untracked files -- nothing pre-existing was modified.
+## Full pipeline — SUT clients, orchestrator, config
+
+Turned the evaluation library into a runnable end-to-end framework.
+
+### `src/generator/` — adapted from another project, stripped to LLM clients
+- Removed all toxicity/pattern-mining machinery: tree-adherence scoring (stanza/nltk), PyTorch Lightning training, T5 paraphrasing, topic/pattern/few-shot logic, and the Watson/T5/Baseline backends.
+- Reduced to a minimal `LLMClient` interface (`generate(prompt, system=?, temperature=?) -> str`) with three backends: `GeminiClient`, `DeepSeekClient` (both via a shared `OpenAICompatibleClient`), and `LocalLLMClient` (vLLM/llama.cpp HTTP). `build_llm(config)` factory.
+- These clients are the **System Under Test** (Phase 3) — the piece the pipeline was missing.
+
+### Orchestrator (Phase 3 + wiring)
+- **`elodie/pipeline.py`** — `run_pipeline(oracle, rules, generate_fn, sut, thresholds, output_dir)` chains generate → SUT → gate-scoring for every rule (skipping `excluded_from_generation` rules), computes per-rule and overall EVR/RVR/MAS, and saves everything. Dependency-injected, so `elodie` stays decoupled from `generator`.
+- **`src/run_pipeline.py`** — CLI wiring config → generator + SUT + oracle.
+
+### Split thresholds + config file
+- **`Thresholds(exploit, defeater, compliance)`** — the schema's independent $\tau_1/\tau_2/\tau_3$, threaded through `evaluate_case`; `CaseResult` now records all three (`t_exploit`, `t_defeater`, `t_compliance`).
+- **`Oracle` no longer holds a threshold** — it is a pure scorer; thresholds live in config/evaluation.
+- **`config/elodie.yaml`** + **`elodie/config.py`** (`load_config`) — one parameters file for thresholds, oracle model, generator, and SUT.
+
+### Data registration
+- Per-rule `outputs/cases/<RULE_ID>.json` (every prompt, response, gate score, threshold, verdict) plus `outputs/summary.json` (run metadata + per-rule/overall metrics).
+
+### Also
+- `requirements.txt` += `openai`, `requests`, `pyyaml`.
+- `deberta_example.py` — oracle constructed without a threshold arg.
+- README §7 (Implementation) added; generator README rewritten.
+
+---
+
+## Merge — oracle framework + Phase 1
+
+Merged the DeBERTa oracle / gate-evaluation framework into the same `elodie` package as the Phase 1 prompt generator, so the whole pipeline shares one rule type and one namespace.
+
+### Consolidated into `src/elodie/`
+- **`oracle.py`** -- moved from the standalone `src/oracle/` package. `Oracle` (abstract base, one `score(premise, hypothesis)` method) + `DebertaOracle` (frozen DeBERTa-v3 NLI cross-encoder). Model constant renamed to `DEFAULT_DEBERTA_MODEL` to avoid colliding with `prompt_generation.DEFAULT_MODEL` (Gemini).
+- **`evaluation.py`** -- moved from `src/oracle/case.py`. `CaseResult`, `Verdict`, `evaluate_case`, `save_cases`, and the EVR/RVR/MAS metrics.
+  - **Key integration:** dropped the local `Rule` dataclass; `evaluate_case` now consumes the coworker's `SleecRule` directly, so a prompt is scored against the same rule it was generated from.
+  - **Defeater consequents:** `Defeater.consequent` is now optional. When several defeaters exist, the strongest-entailed one over the threshold is the *active* exception. A consequent-less active defeater fully waives the rule (`SAFE_BYPASS`, `compliance = None`); an active defeater *with* a consequent `B_D` redirects the Gate 3 check to `R => B_D` instead of `R => B`. `CaseResult.compliance` is now `float | None`, and `mean_adherence_score` excludes bypassed (unscored) cases. README §3 and Phases 4/5 updated to match; Phase 5 renumbered to NLI Gate 3 for consistency with the schema.
+- **`__init__.py`** -- now exports the rules, oracle, and evaluation API. `prompt_generation` is intentionally *not* imported here so the oracle side works without langchain installed; the CLI keeps importing it via `elodie.prompt_generation`.
+
+### Removed
+- `src/oracle/` package (contents merged into `src/elodie/`).
+
+### Changed
+- `src/deberta_example.py` -- imports `DebertaOracle` from `elodie` instead of `oracle`.
+- `requirements.txt` -- added `transformers` and `torch` for the oracle.
+
+---
 
 ## Added
+
+Changes made while building the ELODIE Phase 1 pipeline (initial prompt generation). All items below are new, untracked files -- nothing pre-existing was modified.
 
 ### `data/sleec_rules.json`
 One-time, hand-authored SLEEC rule set extracted from Google's [Generative AI Prohibited Use Policy](https://policies.google.com/terms/generative-ai/use-policy) (fetched from the raw page HTML for verbatim accuracy, not a paraphrased summary).
