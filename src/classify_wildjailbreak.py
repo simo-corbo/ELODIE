@@ -25,6 +25,7 @@ import os
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import torch
 from dotenv import load_dotenv
 from tqdm import tqdm
 
@@ -47,6 +48,12 @@ def effective_prompt(row: dict) -> str:
     return adversarial or (row.get("vanilla") or "").strip()
 
 
+def _entailment_indices(config) -> tuple[int, int | None]:
+    """(entailment, contradiction) class indices from the model's label map."""
+    label2id = {k.lower(): v for k, v in config.label2id.items()}
+    return label2id["entailment"], label2id.get("contradiction")
+
+
 def classify_prompts(
     oracle: DebertaOracle,
     prompts: list[str],
@@ -55,27 +62,65 @@ def classify_prompts(
 ) -> list[tuple[SleecRule, float]]:
     """Best-matching rule (argmax entailment) and its score for each prompt.
 
-    Each prompt is scored against *every* rule antecedent in one zero-shot pass
-    (``multi_label=True`` gives independent P(A|Q) per antecedent, exactly like
-    Gate 1); the highest-entailed antecedent wins.
-    """
-    antecedents = [r.antecedent for r in rules]
-    by_antecedent = {r.antecedent: r for r in rules}
-    matches: list[tuple[SleecRule, float]] = []
+    Every prompt is scored against *every* rule antecedent as an NLI
+    (premise=prompt, hypothesis=antecedent) pair; the highest-entailed
+    antecedent wins. The entailment probability is softmax over the
+    entail/contradiction logits, matching the oracle's ``multi_label=True``
+    P(A|Q) used in Gate 1 -- so a prompt's best match here is the rule it would
+    most strongly trigger in the pipeline.
 
-    for start in tqdm(range(0, len(prompts), batch_size), desc="classifying", unit="batch"):
-        batch = prompts[start : start + batch_size]
-        results = oracle.pipeline(
-            batch,
-            candidate_labels=antecedents,
-            hypothesis_template="{}",
-            multi_label=True,
-            batch_size=batch_size,
-        )
-        if isinstance(results, dict):  # a length-1 batch collapses to a single dict
-            results = [results]
-        for res in results:
-            matches.append((by_antecedent[res["labels"][0]], float(res["scores"][0])))
+    For speed this bypasses the zero-shot *pipeline* (which runs sequentially and
+    emits the "use a dataset" warning) and drives the model+tokenizer already
+    loaded inside the oracle directly: one dynamically-padded forward pass per
+    tile of prompts, batched on the GPU under ``inference_mode`` (+ fp16 autocast
+    on CUDA). ``batch_size`` is the target number of (prompt, antecedent) pairs
+    per forward pass.
+    """
+    model = oracle.pipeline.model.eval()
+    tokenizer = oracle.pipeline.tokenizer
+    device = next(model.parameters()).device
+    if device.type != "cuda" and torch.cuda.is_available():
+        model.to("cuda")
+        device = next(model.parameters()).device
+    use_amp = device.type == "cuda"
+    ent_idx, con_idx = _entailment_indices(model.config)
+
+    antecedents = [r.antecedent for r in rules]
+    n_labels = len(antecedents)
+    # How many prompts we can fold into one forward pass while staying near the
+    # requested pair budget (each prompt expands into n_labels pairs).
+    prompts_per_pass = max(1, batch_size // n_labels)
+
+    matches: list[tuple[SleecRule, float]] = []
+    for start in tqdm(
+        range(0, len(prompts), prompts_per_pass), desc="classifying", unit="pass"
+    ):
+        chunk = prompts[start : start + prompts_per_pass]
+        premises = [p for p in chunk for _ in range(n_labels)]
+        hypotheses = antecedents * len(chunk)
+
+        enc = tokenizer(
+            premises,
+            hypotheses,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
+        ).to(device)
+
+        with torch.inference_mode(), torch.autocast(device_type="cuda", enabled=use_amp):
+            logits = model(**enc).logits.float()
+
+        if con_idx is not None:
+            probs = logits[:, [ent_idx, con_idx]].softmax(-1)[:, 0]
+        else:
+            probs = logits.softmax(-1)[:, ent_idx]
+
+        probs = probs.view(len(chunk), n_labels)
+        best_idx = probs.argmax(dim=1)
+        best_score = probs.gather(1, best_idx.unsqueeze(1)).squeeze(1)
+        for i, s in zip(best_idx.tolist(), best_score.tolist()):
+            matches.append((rules[i], float(s)))
 
     return matches
 
@@ -171,12 +216,13 @@ def parse_args() -> argparse.Namespace:
                         help="WildJailbreak dataset config: train | eval (default: train).")
     parser.add_argument("--split", default="train", help="Dataset split (default: train).")
     parser.add_argument("--limit", type=int, default=-1,
-                        help="Random sample size; 0 uses the entire split (slow). Default: 500.")
+                        help="Random sample size; <= 0 uses the entire split (default: -1, all).")
     parser.add_argument("--seed", type=int, default=0, help="Sampling seed (default: 0).")
     parser.add_argument("--by", choices=["category", "rule"], default="category",
                         help="Aggregate the distribution by SLEEC category or rule (default: category).")
-    parser.add_argument("--batch-size", type=int, default=8,
-                        help="Prompts scored per DeBERTa batch (default: 8).")
+    parser.add_argument("--batch-size", type=int, default=256,
+                        help="Target (prompt, antecedent) pairs per DeBERTa forward pass "
+                             "(default: 256). Raise it to saturate a larger GPU.")
     parser.add_argument("--model", default=DEFAULT_DEBERTA_MODEL,
                         help=f"NLI model id (default: {DEFAULT_DEBERTA_MODEL}).")
     parser.add_argument("--rules-file", type=Path, default=DEFAULT_RULES_PATH,
@@ -211,6 +257,10 @@ def main() -> None:
 
     print(f"Loading oracle ({args.model})...")
     oracle = DebertaOracle(model_name=args.model, token=token)
+    device = next(oracle.pipeline.model.parameters()).device
+    if device.type != "cuda" and torch.cuda.is_available():
+        device = torch.device("cuda")
+    print(f"Running on {device} (batch_size={args.batch_size} pairs/pass).")
     matches = classify_prompts(oracle, prompts, rules, args.batch_size)
 
     key = (lambda rule: rule.category_id) if args.by == "category" else (lambda rule: rule.rule_id)
