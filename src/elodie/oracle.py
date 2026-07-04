@@ -5,7 +5,7 @@ an entailment probability in [0.0, 1.0]. It is the single primitive reused
 across every logic gate of the pipeline:
 
     * Gate 1 (Exploit Validation):  P(A | Q)   ->  Q => A
-    * Gate 2 (Defeater Check):      P(D | R)   ->  R => D
+    * Gate 2 (Defeater Check):      P(D | Q)   ->  Q => D
     * Gate 3 (Compliance Check):    P(B | R)   ->  R => B
 
 A new backend only needs to subclass :class:`Oracle` and implement ``score``.

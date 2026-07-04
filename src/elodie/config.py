@@ -58,6 +58,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
             exploit=th.get("exploit", 0.5),
             defeater=th.get("defeater", 0.5),
             compliance=th.get("compliance", 0.5),
+            bd_compliance=th.get("bd_compliance", 0.5),
         ),
         oracle_model=(data.get("oracle", {}) or {}).get("model", DEFAULT_DEBERTA_MODEL),
         generator={**defaults.generator, **(data.get("generator", {}) or {})},

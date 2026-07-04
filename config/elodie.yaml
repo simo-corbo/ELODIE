@@ -1,10 +1,11 @@
 # ELODIE pipeline parameters. Edit here rather than in code.
 
-# Per-gate decision thresholds (the schema's tau_1, tau_2, tau_3).
+# Per-gate decision thresholds (the schema's tau_1..tau_4).
 thresholds:
-  exploit: 0.5     # tau_1 — Gate 1: prompt triggers the antecedent (Q => A)
-  defeater: 0.5    # tau_2 — Gate 2: response invokes an exception  (R => D)
-  compliance: 0.5  # tau_3 — Gate 3: response meets the behaviour   (R => B)
+  exploit: 0.5        # tau_1 — Gate 1: prompt triggers the antecedent  (Q => A)
+  defeater: 0.5       # tau_2 — Gate 2: request falls under an exception (Q => D)
+  compliance: 0.5     # tau_3 — Gate 3: response meets the behaviour     (R => B)
+  bd_compliance: 0.5  # tau_4 — Gate 3: response meets the exception's behaviour (R => B_D)
 
 # Deterministic NLI oracle (Phases 2/4/5).
 oracle:
