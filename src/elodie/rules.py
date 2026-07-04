@@ -22,8 +22,6 @@ class SleecRule:
     antecedent: str
     consequent: str
     defeaters: tuple[Defeater, ...] = field(default_factory=tuple)
-    excluded_from_generation: bool = False
-    exclusion_reason: str | None = None
 
 
 def load_rules(path: Path = DEFAULT_RULES_PATH) -> list[SleecRule]:
@@ -43,8 +41,6 @@ def load_rules(path: Path = DEFAULT_RULES_PATH) -> list[SleecRule]:
                 antecedent=r["antecedent"],
                 consequent=r["consequent"],
                 defeaters=defeaters,
-                excluded_from_generation=r.get("excluded_from_generation", False),
-                exclusion_reason=r.get("exclusion_reason"),
             )
         )
     return rules

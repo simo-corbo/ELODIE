@@ -72,11 +72,6 @@ def generate_prompts(
     """Generate n user prompts that trigger rule.antecedent, via Gemini (ELODIE Phase 1)."""
     if n < 1:
         raise ValueError("n must be >= 1")
-    if rule.excluded_from_generation:
-        raise ValueError(
-            f"Rule {rule.rule_id!r} is excluded from automated prompt generation: "
-            f"{rule.exclusion_reason}"
-        )
 
     llm = llm or get_llm(model)
 

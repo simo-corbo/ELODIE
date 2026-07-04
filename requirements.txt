@@ -11,3 +11,8 @@ torch
 openai          # Gemini / DeepSeek OpenAI-compatible clients
 requests        # local (vLLM / llama.cpp) client
 pyyaml          # config/elodie.yaml
+
+# Dataset analysis side-scripts (src/classify_wildjailbreak.py)
+datasets        # allenai/wildjailbreak loader
+matplotlib      # best-match distribution plots
+tqdm            # progress bars

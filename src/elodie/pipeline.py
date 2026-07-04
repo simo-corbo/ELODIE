@@ -78,7 +78,6 @@ def run_pipeline(
     thresholds: Thresholds = Thresholds(),
     output_dir: str | Path | None = None,
     *,
-    skip_excluded: bool = True,
     verbose: bool = True,
 ) -> dict:
     """Run every rule end-to-end, saving per-rule cases and a run summary.
@@ -90,11 +89,6 @@ def run_pipeline(
     per_rule_metrics: dict[str, dict] = {}
 
     for rule in rules:
-        if skip_excluded and rule.excluded_from_generation:
-            if verbose:
-                print(f"Skipping {rule.rule_id}: {rule.exclusion_reason}")
-            continue
-
         if verbose:
             print(f"Running {rule.rule_id}...")
         prompts = generate_fn(rule)

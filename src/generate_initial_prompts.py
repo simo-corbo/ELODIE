@@ -63,10 +63,6 @@ def main() -> None:
         rules = load_rules(args.rules_file)
 
     for rule in rules:
-        if rule.excluded_from_generation:
-            print(f"Skipping {rule.rule_id}: {rule.exclusion_reason}")
-            continue
-
         print(f"Generating {args.num_prompts} prompts for {rule.rule_id}...")
         prompts = generate_prompts(rule, args.num_prompts, model=args.model)
         output_path = args.output_dir / f"{rule.rule_id.lower()}_prompts.json"
