@@ -25,6 +25,10 @@ import os
 from collections import Counter, defaultdict
 from pathlib import Path
 
+# Reduce CUDA fragmentation for the many differently-sized batches we run.
+# Must be set before torch initialises CUDA, hence before the torch import.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -54,11 +58,50 @@ def _entailment_indices(config) -> tuple[int, int | None]:
     return label2id["entailment"], label2id.get("contradiction")
 
 
+def _score_chunk(
+    model, tokenizer, device, use_amp, chunk, antecedents, ent_idx, con_idx, max_length
+) -> torch.Tensor:
+    """P(entail) matrix [len(chunk), n_labels] for a chunk of prompts.
+
+    Splits and retries on CUDA OOM so a single very long prompt can never abort
+    the run; the recursion bottoms out at one prompt.
+    """
+    n_labels = len(antecedents)
+    premises = [p for p in chunk for _ in range(n_labels)]
+    hypotheses = antecedents * len(chunk)
+    enc = tokenizer(
+        premises, hypotheses, padding=True, truncation=True,
+        max_length=max_length, return_tensors="pt",
+    ).to(device)
+    try:
+        with torch.inference_mode(), torch.autocast(device_type="cuda", enabled=use_amp):
+            logits = model(**enc).logits.float()
+    except torch.OutOfMemoryError:
+        del enc
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        if len(chunk) == 1:
+            raise
+        mid = len(chunk) // 2
+        top = _score_chunk(model, tokenizer, device, use_amp, chunk[:mid],
+                           antecedents, ent_idx, con_idx, max_length)
+        bot = _score_chunk(model, tokenizer, device, use_amp, chunk[mid:],
+                           antecedents, ent_idx, con_idx, max_length)
+        return torch.cat([top, bot], dim=0)
+
+    if con_idx is not None:
+        probs = logits[:, [ent_idx, con_idx]].softmax(-1)[:, 0]
+    else:
+        probs = logits.softmax(-1)[:, ent_idx]
+    return probs.view(len(chunk), n_labels)
+
+
 def classify_prompts(
     oracle: DebertaOracle,
     prompts: list[str],
     rules: list[SleecRule],
     batch_size: int,
+    max_length: int = 256,
 ) -> list[tuple[SleecRule, float]]:
     """Best-matching rule (argmax entailment) and its score for each prompt.
 
@@ -69,12 +112,17 @@ def classify_prompts(
     P(A|Q) used in Gate 1 -- so a prompt's best match here is the rule it would
     most strongly trigger in the pipeline.
 
-    For speed this bypasses the zero-shot *pipeline* (which runs sequentially and
-    emits the "use a dataset" warning) and drives the model+tokenizer already
-    loaded inside the oracle directly: one dynamically-padded forward pass per
-    tile of prompts, batched on the GPU under ``inference_mode`` (+ fp16 autocast
-    on CUDA). ``batch_size`` is the target number of (prompt, antecedent) pairs
-    per forward pass.
+    Fast and memory-safe:
+      * bypasses the zero-shot *pipeline* (sequential, emits the "use a dataset"
+        warning) and drives the oracle's model+tokenizer directly;
+      * **sorts prompts by length** so each padded batch is short and uniform --
+        the many short vanilla prompts fly through, and padding waste is minimal;
+      * runs under ``inference_mode`` + fp16 autocast on CUDA;
+      * **halves and retries any batch that OOMs**, so one pathological prompt
+        can't kill the run.
+
+    ``batch_size`` is the target number of (prompt, antecedent) pairs per forward
+    pass; ``max_length`` caps the tokenised pair length (prompts are truncated).
     """
     model = oracle.pipeline.model.eval()
     tokenizer = oracle.pipeline.tokenizer
@@ -87,42 +135,28 @@ def classify_prompts(
 
     antecedents = [r.antecedent for r in rules]
     n_labels = len(antecedents)
-    # How many prompts we can fold into one forward pass while staying near the
-    # requested pair budget (each prompt expands into n_labels pairs).
     prompts_per_pass = max(1, batch_size // n_labels)
 
-    matches: list[tuple[SleecRule, float]] = []
-    for start in tqdm(
-        range(0, len(prompts), prompts_per_pass), desc="classifying", unit="pass"
-    ):
-        chunk = prompts[start : start + prompts_per_pass]
-        premises = [p for p in chunk for _ in range(n_labels)]
-        hypotheses = antecedents * len(chunk)
+    # Order shortest-first so each batch pads to a small, uniform length.
+    tokenized = tokenizer(prompts, truncation=True, max_length=max_length)["input_ids"]
+    order = sorted(range(len(prompts)), key=lambda i: len(tokenized[i]))
 
-        enc = tokenizer(
-            premises,
-            hypotheses,
-            padding=True,
-            truncation=True,
-            max_length=512,
-            return_tensors="pt",
-        ).to(device)
+    matches: list[tuple[SleecRule, float] | None] = [None] * len(prompts)
+    with tqdm(total=len(prompts), desc="classifying", unit="prompt") as pbar:
+        for start in range(0, len(order), prompts_per_pass):
+            idx = order[start : start + prompts_per_pass]
+            chunk = [prompts[i] for i in idx]
+            probs = _score_chunk(
+                model, tokenizer, device, use_amp, chunk,
+                antecedents, ent_idx, con_idx, max_length,
+            )
+            best = probs.argmax(dim=1)
+            best_score = probs.gather(1, best.unsqueeze(1)).squeeze(1)
+            for i, b, s in zip(idx, best.tolist(), best_score.tolist()):
+                matches[i] = (rules[b], float(s))
+            pbar.update(len(idx))
 
-        with torch.inference_mode(), torch.autocast(device_type="cuda", enabled=use_amp):
-            logits = model(**enc).logits.float()
-
-        if con_idx is not None:
-            probs = logits[:, [ent_idx, con_idx]].softmax(-1)[:, 0]
-        else:
-            probs = logits.softmax(-1)[:, ent_idx]
-
-        probs = probs.view(len(chunk), n_labels)
-        best_idx = probs.argmax(dim=1)
-        best_score = probs.gather(1, best_idx.unsqueeze(1)).squeeze(1)
-        for i, s in zip(best_idx.tolist(), best_score.tolist()):
-            matches.append((rules[i], float(s)))
-
-    return matches
+    return matches  # type: ignore[return-value]  # every slot is filled above
 
 
 def load_wildjailbreak(config: str, split: str, limit: int, seed: int, token: str | None):
@@ -222,7 +256,11 @@ def parse_args() -> argparse.Namespace:
                         help="Aggregate the distribution by SLEEC category or rule (default: category).")
     parser.add_argument("--batch-size", type=int, default=256,
                         help="Target (prompt, antecedent) pairs per DeBERTa forward pass "
-                             "(default: 256). Raise it to saturate a larger GPU.")
+                             "(default: 256). Raise it to saturate a larger GPU; batches that "
+                             "OOM are automatically halved and retried.")
+    parser.add_argument("--max-length", type=int, default=256,
+                        help="Max tokenised pair length; prompts are truncated to fit "
+                             "(default: 256). Lower it if you still hit OOM.")
     parser.add_argument("--model", default=DEFAULT_DEBERTA_MODEL,
                         help=f"NLI model id (default: {DEFAULT_DEBERTA_MODEL}).")
     parser.add_argument("--rules-file", type=Path, default=DEFAULT_RULES_PATH,
@@ -260,8 +298,9 @@ def main() -> None:
     device = next(oracle.pipeline.model.parameters()).device
     if device.type != "cuda" and torch.cuda.is_available():
         device = torch.device("cuda")
-    print(f"Running on {device} (batch_size={args.batch_size} pairs/pass).")
-    matches = classify_prompts(oracle, prompts, rules, args.batch_size)
+    print(f"Running on {device} (batch_size={args.batch_size} pairs/pass, "
+          f"max_length={args.max_length}).")
+    matches = classify_prompts(oracle, prompts, rules, args.batch_size, args.max_length)
 
     key = (lambda rule: rule.category_id) if args.by == "category" else (lambda rule: rule.rule_id)
     counts_by_type: dict[str, Counter] = defaultdict(Counter)
