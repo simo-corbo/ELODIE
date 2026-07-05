@@ -14,5 +14,6 @@ pyyaml          # config/elodie.yaml
 
 # Dataset analysis side-scripts (src/classify_wildjailbreak.py)
 datasets        # allenai/wildjailbreak loader
-matplotlib      # best-match distribution plots
+matplotlib      # category histogram + multi-trigger plots
+numpy           # per-category score aggregation
 tqdm            # progress bars

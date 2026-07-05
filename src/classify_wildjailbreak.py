@@ -1,20 +1,26 @@
 """Classify each WildJailbreak prompt against the SLEEC rule set with DeBERTa.
 
 Loads the ``allenai/wildjailbreak`` dataset and, for every prompt, uses the same
-DeBERTa-v3 NLI oracle that powers ELODIE's Gate 1 (Q => A) to find the SLEEC
-rule whose antecedent the prompt most strongly entails -- i.e. the rule the
-prompt best *triggers*. It then plots, for each of the dataset's four
-``data_type`` categories, the distribution of best-matching SLEEC categories
-(or rules, with ``--by rule``).
+DeBERTa-v3 NLI oracle that powers ELODIE's Gate 1 (Q => A) to score how strongly
+the prompt entails each SLEEC rule's antecedent -- i.e. how much it *triggers*
+that rule. A category's score is the max over its rules, and the prompt's
+closest-matching category is the argmax; if even that best score is below
+``--threshold`` the prompt is bucketed as ``Other/None``.
+
+Outputs (under ``outputs/wildjailbreak/``):
+  * a CSV with one row per prompt and one column per SLEEC category holding that
+    category's score;
+  * a histogram of the closest-matching category across the dataset;
+  * a separate figure showing how prompts can trigger more than one category
+    (distribution of #categories triggered + a category co-occurrence heatmap).
 
 Run from the ``src/`` directory (so ``elodie`` is importable):
 
     python classify_wildjailbreak.py --limit 500
-    python classify_wildjailbreak.py --limit 0 --by rule      # whole split (slow)
+    python classify_wildjailbreak.py                 # whole split (default)
 
 The dataset is gated, so an ``HF_TOKEN`` must be set in the environment (or a
-``.env`` file). Outputs a per-prompt CSV and a distribution PNG under
-``outputs/wildjailbreak/``.
+``.env`` file).
 """
 
 from __future__ import annotations
@@ -22,13 +28,14 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 # Reduce CUDA fragmentation for the many differently-sized batches we run.
 # Must be set before torch initialises CUDA, hence before the torch import.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+import numpy as np
 import torch
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -37,9 +44,7 @@ from elodie.oracle import DEFAULT_DEBERTA_MODEL, DebertaOracle
 from elodie.rules import DEFAULT_RULES_PATH, SleecRule, load_rules
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "wildjailbreak"
-
-# Fixed display order for the dataset's four data_type buckets.
-DATA_TYPES = ["vanilla_harmful", "vanilla_benign", "adversarial_harmful", "adversarial_benign"]
+OTHER = "Other/None"
 
 
 def effective_prompt(row: dict) -> str:
@@ -102,15 +107,14 @@ def classify_prompts(
     rules: list[SleecRule],
     batch_size: int,
     max_length: int = 256,
-) -> list[tuple[SleecRule, float]]:
-    """Best-matching rule (argmax entailment) and its score for each prompt.
+) -> np.ndarray:
+    """Per-rule entailment scores: an ``[n_prompts, n_rules]`` array of P(A|Q).
 
     Every prompt is scored against *every* rule antecedent as an NLI
-    (premise=prompt, hypothesis=antecedent) pair; the highest-entailed
-    antecedent wins. The entailment probability is softmax over the
-    entail/contradiction logits, matching the oracle's ``multi_label=True``
-    P(A|Q) used in Gate 1 -- so a prompt's best match here is the rule it would
-    most strongly trigger in the pipeline.
+    (premise=prompt, hypothesis=antecedent) pair. The entailment probability is
+    softmax over the entail/contradiction logits, matching the oracle's
+    ``multi_label=True`` P(A|Q) used in Gate 1. Column ``j`` corresponds to
+    ``rules[j]``; rows preserve the input prompt order.
 
     Fast and memory-safe:
       * bypasses the zero-shot *pipeline* (sequential, emits the "use a dataset"
@@ -141,7 +145,7 @@ def classify_prompts(
     tokenized = tokenizer(prompts, truncation=True, max_length=max_length)["input_ids"]
     order = sorted(range(len(prompts)), key=lambda i: len(tokenized[i]))
 
-    matches: list[tuple[SleecRule, float] | None] = [None] * len(prompts)
+    scores = np.empty((len(prompts), n_labels), dtype=np.float32)
     with tqdm(total=len(prompts), desc="classifying", unit="prompt") as pbar:
         for start in range(0, len(order), prompts_per_pass):
             idx = order[start : start + prompts_per_pass]
@@ -150,13 +154,10 @@ def classify_prompts(
                 model, tokenizer, device, use_amp, chunk,
                 antecedents, ent_idx, con_idx, max_length,
             )
-            best = probs.argmax(dim=1)
-            best_score = probs.gather(1, best.unsqueeze(1)).squeeze(1)
-            for i, b, s in zip(idx, best.tolist(), best_score.tolist()):
-                matches[i] = (rules[b], float(s))
+            scores[idx] = probs.cpu().numpy()
             pbar.update(len(idx))
 
-    return matches  # type: ignore[return-value]  # every slot is filled above
+    return scores
 
 
 def load_wildjailbreak(config: str, split: str, limit: int, seed: int, token: str | None):
@@ -176,10 +177,8 @@ def load_wildjailbreak(config: str, split: str, limit: int, seed: int, token: st
     return ds
 
 
-def ordered_keys(rules: list[SleecRule], level: str) -> list[str]:
-    """Category ids (deduped) or rule ids, in rules-file order, for a stable axis."""
-    if level == "rule":
-        return [r.rule_id for r in rules]
+def category_order(rules: list[SleecRule]) -> list[str]:
+    """Unique category ids in rules-file order, for a stable axis."""
     seen: list[str] = []
     for r in rules:
         if r.category_id not in seen:
@@ -187,56 +186,121 @@ def ordered_keys(rules: list[SleecRule], level: str) -> list[str]:
     return seen
 
 
-def save_csv(records: list[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=["data_type", "best_rule_id", "best_category_id", "score", "prompt"]
-        )
-        writer.writeheader()
-        writer.writerows(records)
+def category_scores(
+    rule_scores: np.ndarray, rules: list[SleecRule], categories: list[str]
+) -> np.ndarray:
+    """Collapse per-rule scores to per-category scores (max rule within category).
+
+    Returns an ``[n_prompts, n_categories]`` array; column ``c`` is
+    ``categories[c]``.
+    """
+    index = {c: i for i, c in enumerate(categories)}
+    out = np.full((rule_scores.shape[0], len(categories)), -1.0, dtype=np.float32)
+    for j, r in enumerate(rules):
+        c = index[r.category_id]
+        np.maximum(out[:, c], rule_scores[:, j], out=out[:, c])
+    return out
 
 
-def plot_distribution(
-    counts_by_type: dict[str, Counter],
-    keys: list[str],
-    level: str,
+def save_scores_csv(
+    prompts: list[str],
+    data_types: list[str],
+    best_labels: list[str],
+    n_triggered: np.ndarray,
+    cat_scores: np.ndarray,
+    categories: list[str],
     path: Path,
 ) -> None:
+    """One row per prompt; one column per category holding that category's score."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = ["prompt", "data_type", "best_category", "n_triggered"] + \
+             [f"score_{c}" for c in categories]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for i, prompt in enumerate(prompts):
+            row = [prompt, data_types[i], best_labels[i], int(n_triggered[i])]
+            row += [round(float(v), 4) for v in cat_scores[i]]
+            writer.writerow(row)
+
+
+def plot_category_histogram(
+    best_labels: list[str], categories: list[str], threshold: float, path: Path
+) -> None:
+    """Histogram: x = SLEEC category (closest match), y = number of prompts."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    present = [dt for dt in DATA_TYPES if dt in counts_by_type]
-    present += [dt for dt in counts_by_type if dt not in present]
+    order = categories + [OTHER]
+    counts = Counter(best_labels)
+    vals = [counts.get(c, 0) for c in order]
 
-    ncols = 2 if len(present) > 1 else 1
-    nrows = (len(present) + ncols - 1) // ncols
-    height = max(4.0, 0.32 * len(keys)) * nrows
-    fig, axes = plt.subplots(nrows, ncols, figsize=(14, height), squeeze=False)
-    y = range(len(keys))
-    colors = plt.cm.tab10(range(len(present)))
-
-    for ax, dt, color in zip(axes.flat, present, colors):
-        counts = counts_by_type[dt]
-        vals = [counts.get(k, 0) for k in keys]
-        ax.barh(list(y), vals, color=color)
-        ax.set_yticks(list(y))
-        ax.set_yticklabels(keys, fontsize=8)
-        ax.invert_yaxis()
-        ax.set_title(f"{dt}  (n={sum(vals)})", fontsize=10)
-        ax.set_xlabel("prompts")
-        ax.grid(axis="x", alpha=0.3)
-
-    for ax in axes.flat[len(present):]:
-        ax.axis("off")
-
-    fig.suptitle(
-        f"Best-matching SLEEC {level} distribution by WildJailbreak data_type",
-        fontsize=13,
+    fig, ax = plt.subplots(figsize=(max(10, 0.9 * len(order)), 6))
+    colors = ["tab:gray" if c == OTHER else "tab:blue" for c in order]
+    bars = ax.bar(range(len(order)), vals, color=colors)
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels(order, rotation=45, ha="right", fontsize=9)
+    ax.set_ylabel("prompts (closest-matching category)")
+    ax.set_title(
+        f"Closest-matching SLEEC category across WildJailbreak  (threshold={threshold})"
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    ax.bar_label(bars, fontsize=8)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def plot_multitrigger(
+    triggered: np.ndarray, categories: list[str], threshold: float, path: Path
+) -> None:
+    """Separate figure for prompts that trigger more than one category.
+
+    Left: distribution of how many categories each prompt triggers (score >=
+    threshold). Right: category co-occurrence heatmap -- cell (i, j) is the
+    number of prompts that trigger *both* category i and j; the diagonal is the
+    total number of prompts triggering each category.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_trig = triggered.sum(axis=1)
+    max_k = int(n_trig.max()) if n_trig.size else 0
+    ks = list(range(max_k + 1))
+    k_counts = [int((n_trig == k).sum()) for k in ks]
+
+    co = triggered.astype(np.int64).T @ triggered.astype(np.int64)  # [C, C]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+
+    bars = ax1.bar(ks, k_counts, color="tab:purple")
+    ax1.set_xlabel("number of categories triggered (score >= threshold)")
+    ax1.set_ylabel("prompts")
+    ax1.set_title(f"How many categories each prompt triggers  (threshold={threshold})")
+    ax1.set_xticks(ks)
+    ax1.bar_label(bars, fontsize=8)
+    ax1.grid(axis="y", alpha=0.3)
+
+    im = ax2.imshow(co, cmap="viridis")
+    ax2.set_xticks(range(len(categories)))
+    ax2.set_xticklabels(categories, rotation=45, ha="right", fontsize=7)
+    ax2.set_yticks(range(len(categories)))
+    ax2.set_yticklabels(categories, fontsize=7)
+    ax2.set_title("Category co-occurrence (prompts triggering both; diagonal = total)")
+    hi = co.max() if co.size else 1
+    for i in range(len(categories)):
+        for j in range(len(categories)):
+            ax2.text(j, i, int(co[i, j]), ha="center", va="center",
+                     color="white" if co[i, j] < hi / 2 else "black", fontsize=6)
+    fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
+
+    fig.suptitle("Multi-category triggering across WildJailbreak", fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -244,7 +308,7 @@ def plot_distribution(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Match WildJailbreak prompts to their best-fitting SLEEC rule with DeBERTa."
+        description="Match WildJailbreak prompts to their closest SLEEC category with DeBERTa."
     )
     parser.add_argument("--config", default="train",
                         help="WildJailbreak dataset config: train | eval (default: train).")
@@ -252,8 +316,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=-1,
                         help="Random sample size; <= 0 uses the entire split (default: -1, all).")
     parser.add_argument("--seed", type=int, default=0, help="Sampling seed (default: 0).")
-    parser.add_argument("--by", choices=["category", "rule"], default="category",
-                        help="Aggregate the distribution by SLEEC category or rule (default: category).")
+    parser.add_argument("--threshold", type=float, default=0.5,
+                        help="Min entailment score for a category to count as triggered; "
+                             "if the best category is below it the prompt is 'Other/None' "
+                             "(default: 0.5).")
     parser.add_argument("--batch-size", type=int, default=256,
                         help="Target (prompt, antecedent) pairs per DeBERTa forward pass "
                              "(default: 256). Raise it to saturate a larger GPU; batches that "
@@ -266,7 +332,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rules-file", type=Path, default=DEFAULT_RULES_PATH,
                         help="Path to the SLEEC rules JSON file.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
-                        help="Directory for the CSV and PNG (default: outputs/wildjailbreak).")
+                        help="Directory for the CSV and PNGs (default: outputs/wildjailbreak).")
     return parser.parse_args()
 
 
@@ -279,7 +345,8 @@ def main() -> None:
         print("Warning: no HF_TOKEN set; loading the gated WildJailbreak dataset will likely fail.")
 
     rules = load_rules(args.rules_file)
-    print(f"Loaded {len(rules)} SLEEC rules.")
+    categories = category_order(rules)
+    print(f"Loaded {len(rules)} SLEEC rules across {len(categories)} categories.")
 
     print(f"Loading WildJailbreak ({args.config}/{args.split})...")
     ds = load_wildjailbreak(args.config, args.split, args.limit, args.seed, token)
@@ -300,37 +367,38 @@ def main() -> None:
         device = torch.device("cuda")
     print(f"Running on {device} (batch_size={args.batch_size} pairs/pass, "
           f"max_length={args.max_length}).")
-    matches = classify_prompts(oracle, prompts, rules, args.batch_size, args.max_length)
 
-    key = (lambda rule: rule.category_id) if args.by == "category" else (lambda rule: rule.rule_id)
-    counts_by_type: dict[str, Counter] = defaultdict(Counter)
-    records: list[dict] = []
-    for row, prompt, (rule, score) in zip(rows, prompts, matches):
-        data_type = row.get("data_type") or "unknown"
-        counts_by_type[data_type][key(rule)] += 1
-        records.append({
-            "data_type": data_type,
-            "best_rule_id": rule.rule_id,
-            "best_category_id": rule.category_id,
-            "score": round(score, 4),
-            "prompt": prompt,
-        })
+    rule_scores = classify_prompts(oracle, prompts, rules, args.batch_size, args.max_length)
+    cat_scores = category_scores(rule_scores, rules, categories)
 
-    csv_path = args.output_dir / "wildjailbreak_matches.csv"
-    png_path = args.output_dir / f"wildjailbreak_{args.by}_distribution.png"
-    save_csv(records, csv_path)
-    plot_distribution(counts_by_type, ordered_keys(rules, args.by), args.by, png_path)
+    best_idx = cat_scores.argmax(axis=1)
+    best_score = cat_scores.max(axis=1)
+    best_labels = [
+        categories[c] if best_score[i] >= args.threshold else OTHER
+        for i, c in enumerate(best_idx)
+    ]
+    triggered = cat_scores >= args.threshold
+    n_triggered = triggered.sum(axis=1)
+    data_types = [r.get("data_type") or "unknown" for r in rows]
 
-    print("\n=== Best-match distribution by data_type ===")
-    for dt in [d for d in DATA_TYPES if d in counts_by_type] + \
-              [d for d in counts_by_type if d not in DATA_TYPES]:
-        total = sum(counts_by_type[dt].values())
-        top = counts_by_type[dt].most_common(3)
-        top_str = ", ".join(f"{k} {n}" for k, n in top)
-        print(f"  {dt:<20} n={total:<6} top: {top_str}")
+    csv_path = args.output_dir / "wildjailbreak_category_scores.csv"
+    hist_path = args.output_dir / "wildjailbreak_category_histogram.png"
+    multi_path = args.output_dir / "wildjailbreak_multitrigger.png"
+    save_scores_csv(prompts, data_types, best_labels, n_triggered, cat_scores, categories, csv_path)
+    plot_category_histogram(best_labels, categories, args.threshold, hist_path)
+    plot_multitrigger(triggered, categories, args.threshold, multi_path)
 
-    print(f"\nSaved matches -> {csv_path}")
-    print(f"Saved plot    -> {png_path}")
+    print(f"\n=== Closest-matching category (threshold={args.threshold}) ===")
+    counts = Counter(best_labels)
+    for c in categories + [OTHER]:
+        print(f"  {c:<28} {counts.get(c, 0)}")
+    multi = int((n_triggered >= 2).sum())
+    print(f"\nPrompts triggering >= 2 categories: {multi} / {len(prompts)} "
+          f"({100 * multi / max(1, len(prompts)):.1f}%)")
+
+    print(f"\nSaved scores    -> {csv_path}")
+    print(f"Saved histogram -> {hist_path}")
+    print(f"Saved multi-fig -> {multi_path}")
 
 
 if __name__ == "__main__":
