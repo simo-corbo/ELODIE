@@ -141,7 +141,9 @@ src/
   run_pipeline.py         # end-to-end CLI (the main entry point)
   generate_initial_prompts.py  # Phase 1 only, saved to outputs/prompts/
   deberta_example.py      # labelled harness that validates the oracle in isolation
+  classify_wildjailbreak.py    # maps the WildJailbreak dataset onto the rule set (analysis)
 outputs/                  # cases/<RULE_ID>.json + summary.json per run
+  wildjailbreak/          # classify_wildjailbreak.py cache CSVs + analysis plots
 ```
 
 ### Core modules
@@ -160,10 +162,11 @@ The design keeps each concern isolated and injectable — the orchestrator depen
 
 ### Standalone scripts
 
-Two helpers exercise individual stages without a full run:
+Three helpers exercise individual stages or analyse the rule set without a full run:
 
 * **`generate_initial_prompts.py`** — runs Phase 1 alone and writes the generated prompts to `outputs/prompts/<rule_id>_prompts.json`, for inspecting or curating the test set before evaluating a SUT.
 * **`deberta_example.py`** — runs the `DebertaOracle` against a small, balanced, ground-truth-labelled suite (Gate 1 triggers and Gate 3 adherence) and reports accuracy with false-positive / false-negative counts. Use it to sanity-check the oracle and calibrate thresholds.
+* **`classify_wildjailbreak.py`** — maps every prompt in the [`allenai/wildjailbreak`](https://huggingface.co/datasets/allenai/wildjailbreak) dataset onto the SLEEC rule set using the same DeBERTa Gate-1 scoring ($Q \implies A$), to see which policy categories the dataset's prompts trigger. See §8.
 
 ### Thresholds
 
@@ -185,6 +188,38 @@ python generate_initial_prompts.py -n 10    # Phase 1 only -> outputs/prompts/
 python deberta_example.py                   # validate the oracle on a labelled suite
 ```
 
-Results are written to `outputs/`: one `cases/<RULE_ID>.json` per rule (every prompt, response, gate score, threshold, and verdict) plus a `summary.json` with per-rule and overall EVR/RVR/MAS. Excluded rules (e.g. `CSAM_EXPLOITATION`) are skipped by the generator.
+Results are written to `outputs/`: one `cases/<RULE_ID>.json` per rule (every prompt, response, gate score, threshold, and verdict) plus a `summary.json` with per-rule and overall EVR/RVR/MAS.
 
 > **Note on distractors (§6):** the current oracle scores each hypothesis in isolation with `multi_label=True`, yielding an absolute $P(\text{entailment})$; it does not add an explicit distractor label. This avoids softmax collapse by construction (independent entailment-vs-contradiction normalization) rather than via a competing label.
+
+---
+
+## 8. WildJailbreak Rule-Set Analysis
+
+`src/classify_wildjailbreak.py` is a standalone analysis tool (not part of the evaluation pipeline). It loads the [`allenai/wildjailbreak`](https://huggingface.co/datasets/allenai/wildjailbreak) dataset and, for every prompt, reuses the frozen DeBERTa NLI oracle to score how strongly the prompt entails each rule's antecedent — the same $Q \implies A$ logic as Gate 1. A category's score is the max over its rules, and the prompt's closest-matching category is the argmax; below `--threshold` a prompt is bucketed as `Other/None`.
+
+### Scoring modes
+
+| `--mode` | Scoring | Category score | Use |
+|----------|---------|----------------|-----|
+| `entail` (default) | independent $P(A\mid Q)$ per rule (`multi_label`), values in $[0,1]$ | max rule | a prompt may trigger **several** categories → multi-trigger analysis |
+| `classifier` | a single softmax over all rules per prompt (zero-shot single-label) | sum of rules (distribution sums to 1) | one best category per prompt |
+| `all` | both of the above | — | side-by-side comparison |
+
+Each mode writes its **own** cache CSV (`wildjailbreak_category_scores_<mode>.csv`) and its **own** full set of plots (suffixed `_<mode>.png`). A run first computes any missing cache for the requested mode(s), then regenerates the plots for **every** cached CSV present. Because the threshold-dependent buckets are recomputed from the cached scores at plot time, re-plotting at a different `--threshold` is free (no model reload).
+
+### Choosing a threshold
+
+There is no per-category ground truth. The tool uses the dataset's own `data_type` (`*_harmful` vs `*_benign`) as a **proxy** for "should this prompt trigger any policy category", and recommends the threshold that maximises **Youden's J** ($\text{TPR} - \text{FPR}$) on the best category score — where TPR/FPR are the harmful/benign flag rates. This recommendation, a full threshold-sweep plot, and an Italian one-line description of every figure are printed to the terminal.
+
+### Performance
+
+The classification drives the model directly (not the zero-shot pipeline): prompts are length-sorted for uniform padding, scored under `inference_mode` + fp16 autocast on CUDA, and any batch that OOMs is halved and retried. This is required for the full ~262k-prompt split; a first run needs `HF_TOKEN` (the dataset is gated) and a GPU.
+
+```bash
+cd src
+python classify_wildjailbreak.py                    # entail mode, whole split -> CSV + 9 plots
+python classify_wildjailbreak.py --mode classifier  # add classifier scores + its 9 plots
+python classify_wildjailbreak.py --mode all --limit 500   # both modes on a 500-prompt sample
+python classify_wildjailbreak.py --threshold 0.3    # re-plot every cached CSV, no model
+```
