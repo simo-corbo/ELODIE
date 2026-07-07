@@ -10,15 +10,20 @@ closest-matching category is the argmax; if even that best score is below
 Two scoring modes (``--mode``): ``entail`` scores each rule independently
 (multi-label P(entail), so a prompt can trigger several categories); ``classifier``
 runs a single softmax over the rules per prompt (zero-shot single-label, scores
-sum to 1). Each mode writes its **own** CSV and its **own** full set of plots,
+sum to 1). Each mode writes its **own** JSON and its **own** full set of plots,
 so the two never collide and can be compared side by side (``--mode all`` does
 both).
 
-Scores are cached to a per-mode CSV (one row per prompt, one column per SLEEC
-category). On a later run, every cached CSV present is re-plotted straight from
-disk (pass ``--force`` to recompute). Because the threshold-dependent buckets are
-recomputed from the cached scores, you can re-plot at a different ``--threshold``
-for free.
+Scores are cached to a per-mode JSON (one record per prompt). Each record holds
+the per-category scores and ``rule_scores`` -- a ``{rule_id: score}`` map over every
+rule, keyed by the same ``rule_id`` used in ``sleec_rules.json``. The entailed set
+is *not* stored: the pipeline derives it dynamically by applying its own Gate-1
+threshold τ₁ to these scores, so changing τ₁ never means regenerating the file. The
+``--threshold`` flag below is independent and only buckets the analysis plots. On a
+later run, every cached JSON present is re-plotted straight from disk (pass
+``--force`` to recompute).
+Because the threshold-dependent buckets are recomputed from the cached scores,
+you can re-plot at a different ``--threshold`` for free.
 
 There is no per-category ground truth: the threshold recommendation uses the
 dataset's own ``data_type`` (``*_harmful`` vs ``*_benign``) as a *proxy* label for
@@ -29,18 +34,17 @@ Run from the ``src/`` directory (so ``elodie`` is importable):
     python classify_wildjailbreak.py                       # entail mode, whole split
     python classify_wildjailbreak.py --mode classifier
     python classify_wildjailbreak.py --mode all --limit 500
-    python classify_wildjailbreak.py --threshold 0.6       # re-plot every cached CSV
+    python classify_wildjailbreak.py --threshold 0.6       # re-plot every cached JSON
 
 The dataset is gated, so an ``HF_TOKEN`` must be set in the environment (or a
-``.env`` file) the first time (when a CSV is generated).
+``.env`` file) the first time (when the JSON is generated).
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
+import json
 import os
-import sys
 from collections import Counter
 from pathlib import Path
 
@@ -64,12 +68,9 @@ DT_COLORS = {
     "adversarial_benign": "tab:blue",
 }
 
-# CSV allows very long prompt fields.
-csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
-
 
 # --------------------------------------------------------------------------- #
-# Dataset + classification (only runs when the scores CSV is absent).
+# Dataset + classification (only runs when the scores JSON is absent).
 # --------------------------------------------------------------------------- #
 def effective_prompt(row: dict) -> str:
     """The text to classify: the adversarial prompt if present, else the vanilla one.
@@ -211,7 +212,7 @@ def load_wildjailbreak(config: str, split: str, limit: int, seed: int, token: st
 
 
 # --------------------------------------------------------------------------- #
-# Aggregation + CSV (the cache).
+# Aggregation + JSON (the cache).
 # --------------------------------------------------------------------------- #
 def category_order(rules: list[SleecRule]) -> list[str]:
     """Unique category ids in rules-file order, for a stable axis."""
@@ -245,42 +246,69 @@ def category_scores(
     return out
 
 
-def save_scores_csv(
-    prompts, data_types, best_labels, n_triggered, cat_scores, categories, path: Path
+def save_scores_json(
+    prompts, data_types, cat_scores, categories,
+    rule_ids, rule_scores, rule_categories, threshold: float, mode: str, path: Path,
 ) -> None:
-    """One row per prompt; one column per category holding that category's score."""
+    """One record per prompt: the raw per-category and per-rule scores.
+
+    ``rule_scores`` is a ``{rule_id: score}`` map over **every** rule (keys are the
+    exact ``rule_id`` values from ``sleec_rules.json``). The entailed set is *not*
+    baked in: the pipeline derives it dynamically by applying its own Gate-1
+    threshold τ₁ to these scores, so changing τ₁ never means regenerating the file.
+    ``best_category`` / ``n_triggered`` are informational analysis snapshots taken at
+    ``threshold`` (the ``--threshold`` flag); ``category_scores`` feeds the plots.
+
+    The file is pretty-printed for small samples and written compactly for the
+    full split (where indentation would balloon the file).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    header = ["prompt", "data_type", "best_category", "n_triggered"] + \
-             [f"score_{c}" for c in categories]
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        for i, prompt in enumerate(prompts):
-            row = [prompt, data_types[i], best_labels[i], int(n_triggered[i])]
-            row += [round(float(v), 4) for v in cat_scores[i]]
-            writer.writerow(row)
+    best_idx = cat_scores.argmax(axis=1)
+    best_score = cat_scores.max(axis=1)
+
+    records = []
+    for i, prompt in enumerate(prompts):
+        cat_row = cat_scores[i]
+        rule_row = rule_scores[i]
+        records.append({
+            "prompt": prompt,
+            "data_type": data_types[i],
+            "best_category": categories[int(best_idx[i])] if best_score[i] >= threshold else OTHER,
+            "n_triggered": int((cat_row >= threshold).sum()),
+            "category_scores": {c: round(float(cat_row[j]), 4)
+                                for j, c in enumerate(categories)},
+            "rule_scores": {rid: round(float(rule_row[j]), 4)
+                            for j, rid in enumerate(rule_ids)},
+        })
+
+    payload = {
+        "mode": mode,
+        "threshold": threshold,
+        "categories": categories,
+        "rule_ids": list(rule_ids),
+        "rule_categories": rule_categories,
+        "prompts": records,
+    }
+    indent = 2 if len(records) <= 2000 else None
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=indent)
 
 
-def load_scores_csv(path: Path) -> tuple[list[str], list[str], np.ndarray]:
-    """Read the cached CSV back into (categories, data_types, cat_scores)."""
-    with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        score_cols = [(i, h[len("score_"):]) for i, h in enumerate(header)
-                      if h.startswith("score_")]
-        if not score_cols:
-            raise ValueError(f"{path} has no 'score_<CATEGORY>' columns.")
-        idxs = [i for i, _ in score_cols]
-        categories = [c for _, c in score_cols]
-        dt_i = header.index("data_type") if "data_type" in header else None
-        data_types: list[str] = []
-        rows: list[list[float]] = []
-        for row in reader:
-            if not row:
-                continue
-            data_types.append(row[dt_i] if dt_i is not None else "unknown")
-            rows.append([float(row[i]) for i in idxs])
-    return categories, data_types, np.asarray(rows, dtype=np.float32)
+def load_scores_json(path: Path) -> tuple[list[str], list[str], np.ndarray]:
+    """Read the cached JSON back into (categories, data_types, cat_scores)."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    records = payload.get("prompts", [])
+    categories = payload.get("categories")
+    if categories is None:  # fall back to the keys of the first record's scores
+        categories = list(records[0]["category_scores"]) if records else []
+    if not categories:
+        raise ValueError(f"{path} has no category scores to plot.")
+    data_types = [rec.get("data_type", "unknown") for rec in records]
+    cat_scores = np.array(
+        [[rec["category_scores"][c] for c in categories] for rec in records],
+        dtype=np.float32,
+    ).reshape(len(records), len(categories))
+    return categories, data_types, cat_scores
 
 
 # --------------------------------------------------------------------------- #
@@ -742,13 +770,13 @@ def parse_args() -> argparse.Namespace:
                         help="Scoring mode: 'entail' = independent per-rule P(entail) (multi-label, "
                              "supports multi-trigger analysis); 'classifier' = single softmax over "
                              "rules per prompt (zero-shot single-label, scores sum to 1); 'all' does "
-                             "both. Each mode has its own CSV + plots (default: entail).")
+                             "both. Each mode has its own JSON + plots (default: entail).")
     parser.add_argument("--threshold", type=float, default=0.5,
                         help="Min score for a category to count as triggered; below it the best "
                              "category becomes 'Other/None' (default: 0.5). Applied when plotting, "
                              "so it can be changed without re-running the model.")
     parser.add_argument("--force", action="store_true",
-                        help="Recompute scores with DeBERTa even if the cached CSV exists.")
+                        help="Recompute scores with DeBERTa even if the cached JSON exists.")
     parser.add_argument("--batch-size", type=int, default=256,
                         help="Target (prompt, antecedent) pairs per DeBERTa forward pass "
                              "(default: 256). OOM batches are halved and retried.")
@@ -759,34 +787,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rules-file", type=Path, default=DEFAULT_RULES_PATH,
                         help="Path to the SLEEC rules JSON file.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
-                        help="Directory for the CSV and PNGs (default: outputs/wildjailbreak).")
+                        help="Directory for the JSON and PNGs (default: outputs/wildjailbreak).")
     return parser.parse_args()
 
 
-def scores_csv_path(out_dir: Path, mode: str) -> Path:
-    return out_dir / f"wildjailbreak_category_scores_{mode}.csv"
+def scores_json_path(out_dir: Path, mode: str) -> Path:
+    return out_dir / f"wildjailbreak_category_scores_{mode}.json"
 
 
-def existing_score_csvs(out_dir: Path) -> dict[str, Path]:
-    """Map mode -> cached scores CSV for every mode present in ``out_dir``.
-
-    A pre-``--mode`` file (``wildjailbreak_category_scores.csv``) is treated as
-    the ``entail`` cache so earlier runs aren't wasted.
-    """
+def existing_score_jsons(out_dir: Path) -> dict[str, Path]:
+    """Map mode -> cached scores JSON for every mode present in ``out_dir``."""
     found: dict[str, Path] = {}
-    legacy = out_dir / "wildjailbreak_category_scores.csv"
-    if legacy.exists():
-        found["entail"] = legacy
     prefix = "wildjailbreak_category_scores_"
-    for p in sorted(out_dir.glob(f"{prefix}*.csv")):
-        found[p.stem[len(prefix):]] = p  # a suffixed file overrides the legacy one
+    for p in sorted(out_dir.glob(f"{prefix}*.json")):
+        found[p.stem[len(prefix):]] = p
     return found
 
 
-def compute_scores(args, mode: str) -> tuple[list[str], list[str], np.ndarray, list[str]]:
+def compute_scores(args, mode: str):
     """Run the DeBERTa classification for one mode.
 
-    Returns (categories, data_types, cat_scores, prompts).
+    Returns (categories, data_types, cat_scores, prompts, rule_ids, rule_scores,
+    rule_categories) — the last three carrying the per-rule detail embedded in
+    the JSON cache.
     """
     from dotenv import load_dotenv
 
@@ -799,6 +822,8 @@ def compute_scores(args, mode: str) -> tuple[list[str], list[str], np.ndarray, l
 
     rules = load_rules(args.rules_file)
     categories = category_order(rules)
+    rule_ids = [r.rule_id for r in rules]
+    rule_categories = {r.rule_id: r.category_id for r in rules}
     print(f"Loaded {len(rules)} SLEEC rules across {len(categories)} categories.")
 
     print(f"Loading WildJailbreak ({args.config}/{args.split})...")
@@ -821,7 +846,7 @@ def compute_scores(args, mode: str) -> tuple[list[str], list[str], np.ndarray, l
     rule_scores = classify_prompts(oracle, prompts, rules, args.batch_size, args.max_length, mode)
     agg = "sum" if mode == "classifier" else "max"
     cat_scores = category_scores(rule_scores, rules, categories, agg)
-    return categories, data_types, cat_scores, prompts
+    return categories, data_types, cat_scores, prompts, rule_ids, rule_scores, rule_categories
 
 
 def main() -> None:
@@ -829,30 +854,28 @@ def main() -> None:
     out = args.output_dir
     target_modes = ["entail", "classifier"] if args.mode == "all" else [args.mode]
 
-    # 1) Ensure a scores CSV exists for each requested mode (compute only if missing/forced).
-    cached = existing_score_csvs(out)
+    # 1) Ensure a scores JSON exists for each requested mode (compute only if missing/forced).
+    #    Every rule's raw score is stored; the pipeline applies its own τ₁ at read time.
+    cached = existing_score_jsons(out)
     for mode in target_modes:
         if mode in cached and not args.force:
             print(f"Found cached {mode} scores -> {cached[mode]} (use --force to recompute).")
             continue
-        categories, data_types, cat_scores, prompts = compute_scores(args, mode)
-        best_idx = cat_scores.argmax(axis=1)
-        best_score = cat_scores.max(axis=1)
-        best_labels = [categories[c] if best_score[i] >= args.threshold else OTHER
-                       for i, c in enumerate(best_idx)]
-        n_triggered = (cat_scores >= args.threshold).sum(axis=1)
-        path = scores_csv_path(out, mode)
-        save_scores_csv(prompts, data_types, best_labels, n_triggered, cat_scores, categories, path)
+        (categories, data_types, cat_scores, prompts,
+         rule_ids, rule_scores, rule_categories) = compute_scores(args, mode)
+        path = scores_json_path(out, mode)
+        save_scores_json(prompts, data_types, cat_scores, categories,
+                         rule_ids, rule_scores, rule_categories, args.threshold, mode, path)
         print(f"Saved {mode} scores -> {path}")
 
-    # 2) Plot every scores CSV present (each mode gets its own full set of plots).
-    cached = existing_score_csvs(out)
+    # 2) Plot every scores JSON present (each mode gets its own full set of plots).
+    cached = existing_score_jsons(out)
     if not cached:
-        print("No score CSVs found; nothing to plot.")
+        print("No score JSON files found; nothing to plot.")
         return
-    for mode, csv_path in cached.items():
-        print(f"\n########## mode: {mode}  ({csv_path.name}) ##########")
-        categories, data_types, cat_scores = load_scores_csv(csv_path)
+    for mode, json_path in cached.items():
+        print(f"\n########## mode: {mode}  ({json_path.name}) ##########")
+        categories, data_types, cat_scores = load_scores_json(json_path)
         plot_paths = generate_plots(cat_scores, categories, data_types, args.threshold, out, mode)
         print(f"\nSaved {len(plot_paths)} plots for mode '{mode}':")
         for p in plot_paths:

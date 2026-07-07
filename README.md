@@ -143,7 +143,7 @@ src/
   deberta_example.py      # labelled harness that validates the oracle in isolation
   classify_wildjailbreak.py    # maps the WildJailbreak dataset onto the rule set (analysis)
 outputs/                  # cases/<RULE_ID>.json + summary.json per run
-  wildjailbreak/          # classify_wildjailbreak.py cache CSVs + analysis plots
+  wildjailbreak/          # classify_wildjailbreak.py score JSONs + analysis plots
 ```
 
 ### Core modules
@@ -206,7 +206,29 @@ Results are written to `outputs/`: one `cases/<RULE_ID>.json` per rule (every pr
 | `classifier` | a single softmax over all rules per prompt (zero-shot single-label) | sum of rules (distribution sums to 1) | one best category per prompt |
 | `all` | both of the above | — | side-by-side comparison |
 
-Each mode writes its **own** cache CSV (`wildjailbreak_category_scores_<mode>.csv`) and its **own** full set of plots (suffixed `_<mode>.png`). A run first computes any missing cache for the requested mode(s), then regenerates the plots for **every** cached CSV present. Because the threshold-dependent buckets are recomputed from the cached scores at plot time, re-plotting at a different `--threshold` is free (no model reload).
+Each mode writes its **own** cache JSON (`wildjailbreak_category_scores_<mode>.json`) and its **own** full set of plots (suffixed `_<mode>.png`). A run first computes any missing cache for the requested mode(s), then regenerates the plots for **every** cached JSON present. Because the threshold-dependent buckets are recomputed from the cached scores at plot time, re-plotting at a different `--threshold` is free (no model reload).
+
+### Cache format (consumed by the pipeline)
+
+The JSON is one record per prompt, and is built to be read back by the ELODIE pipeline — not just to drive the plots. Each record carries the raw scores, so **no entailment decision is baked in**:
+
+```jsonc
+{
+  "mode": "entail", "threshold": 0.5,          // threshold = the analysis --threshold only
+  "categories": [...], "rule_ids": [...],
+  "rule_categories": { "CSAM_EXPLOITATION": "CHILD_SAFETY", ... },
+  "prompts": [
+    {
+      "prompt": "...", "data_type": "vanilla_harmful",
+      "best_category": "CHILD_SAFETY", "n_triggered": 2,   // informational, at --threshold
+      "category_scores": { "CHILD_SAFETY": 0.91, ... },     // per category, feeds the plots
+      "rule_scores":     { "CSAM_EXPLOITATION": 0.91, ... } // per rule, keyed by sleec_rules.json rule_id
+    }
+  ]
+}
+```
+
+`rule_scores` holds **every** rule's score, keyed by the exact `rule_id` from `data/sleec_rules.json`. The pipeline derives the rules a prompt entails *dynamically* — `[rule_id for rule_id, s in rule_scores if s >= τ₁]`, applying its own Gate-1 threshold `τ₁` (`thresholds.exploit` in `config/elodie.yaml`) — so it can test each prompt against **only** the rules it triggers, and changing `τ₁` never means regenerating the file. The stored `--threshold` and `best_category`/`n_triggered` are analysis-only snapshots and do not affect this.
 
 ### Choosing a threshold
 
@@ -218,8 +240,8 @@ The classification drives the model directly (not the zero-shot pipeline): promp
 
 ```bash
 cd src
-python classify_wildjailbreak.py                    # entail mode, whole split -> CSV + 9 plots
+python classify_wildjailbreak.py                    # entail mode, whole split -> JSON + 9 plots
 python classify_wildjailbreak.py --mode classifier  # add classifier scores + its 9 plots
 python classify_wildjailbreak.py --mode all --limit 500   # both modes on a 500-prompt sample
-python classify_wildjailbreak.py --threshold 0.3    # re-plot every cached CSV, no model
+python classify_wildjailbreak.py --threshold 0.3    # re-plot every cached JSON, no model
 ```
