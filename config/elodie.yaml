@@ -12,6 +12,7 @@ oracle:
   model: "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
 
 # Test Generator (Phase 1): produces adversarial prompts per rule via Gemini.
+# Only used in the rule-centric path (no prompts corpus, or --generate).
 generator:
   model: "gemini-2.5-flash"
   num_prompts: 10
@@ -19,12 +20,21 @@ generator:
 # System Under Test (Phase 3): the model being evaluated.
 #   type: gemini | deepseek | local
 #   local reads its endpoint from LOCAL_LLM_BASE_URL in .env (or set base_url here)
+# Gemini 2.5 "thinks" before answering and, on the OpenAI-compatible endpoint,
+# thinking shares the max_tokens budget — so the client disables it by default
+# (reasoning_effort=none) to keep the visible answer from being truncated. Add
+# `thinking: true` here to keep it.
 sut:
   type: "gemini"
   model: "gemini-2.5-flash"
   temperature: 0.7
-  max_tokens: 512
+  max_tokens: 2048
 
 paths:
   rules: "data/sleec_rules.json"
   output_dir: "outputs"
+  # Prompt-centric corpus (default path). Prompts here carry precomputed per-rule
+  # Gate-1 scores, so the pipeline tests real prompts against the rules they
+  # already trigger instead of generating new ones. Comment out (or pass
+  # --generate) to fall back to the rule-centric generator path.
+  prompts: "outputs/wildjailbreak/wildjailbreak_category_scores_entail.json"

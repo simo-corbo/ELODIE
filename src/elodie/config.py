@@ -37,6 +37,10 @@ class Config:
     )
     rules_path: Path = DEFAULT_RULES_PATH
     output_dir: Path = REPO_ROOT / "outputs"
+    # Prompt-centric corpus: a cached scores JSON (from classify_wildjailbreak.py)
+    # whose prompts carry precomputed per-rule Gate-1 scores. When present the CLI
+    # tests these prompts instead of generating fresh ones per rule.
+    prompts_path: Path | None = None
 
 
 def _resolve(path: str | Path) -> Path:
@@ -65,4 +69,5 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         sut={**defaults.sut, **(data.get("sut", {}) or {})},
         rules_path=_resolve(paths.get("rules", DEFAULT_RULES_PATH)),
         output_dir=_resolve(paths.get("output_dir", "outputs")),
+        prompts_path=_resolve(paths["prompts"]) if paths.get("prompts") else None,
     )

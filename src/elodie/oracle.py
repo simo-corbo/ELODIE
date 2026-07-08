@@ -45,10 +45,13 @@ class DebertaOracle(Oracle):
         model_name: str = DEFAULT_DEBERTA_MODEL,
         token: str | None = None,
     ) -> None:
+        # `or None` coerces an empty HF_TOKEN (e.g. `HF_TOKEN=` in .env) to None:
+        # the model is public, and an empty-string token makes the Hub send an
+        # `Authorization: Bearer ` header with no value, which httpx rejects.
         self.pipeline = pipeline(
             "zero-shot-classification",
             model=model_name,
-            token=token or os.getenv("HF_TOKEN"),
+            token=token or os.getenv("HF_TOKEN") or None,
         )
 
     def score(self, premise: str, hypothesis: str) -> float:

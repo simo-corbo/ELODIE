@@ -25,6 +25,7 @@ class OpenAICompatibleClient(LLMClient):
         temperature: float = 0.7,
         max_tokens: int = 512,
         name: str | None = None,
+        extra_body: dict | None = None,
     ) -> None:
         super().__init__(model, temperature=temperature, max_tokens=max_tokens, name=name)
         key = api_key or (os.getenv(api_key_env) if api_key_env else None)
@@ -32,6 +33,9 @@ class OpenAICompatibleClient(LLMClient):
             raise ValueError(
                 f"No API key found; pass api_key or set the {api_key_env} environment variable."
             )
+        # Provider-specific request fields merged into the JSON body (e.g. Gemini's
+        # thinking config). Left as-is for providers that don't need it.
+        self.extra_body = extra_body
         from openai import OpenAI
 
         self._client = OpenAI(api_key=key, base_url=base_url)
@@ -52,5 +56,6 @@ class OpenAICompatibleClient(LLMClient):
             messages=messages,
             temperature=self.temperature if temperature is None else temperature,
             max_tokens=self.max_tokens,
+            extra_body=self.extra_body,
         )
         return (response.choices[0].message.content or "").strip()
