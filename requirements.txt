@@ -6,6 +6,8 @@ python-dotenv
 # Phases 2/4/5 — DeBERTa NLI oracle & gate evaluation
 transformers
 torch
+sentencepiece   # DeBERTa-v3 tokenizer (also used by scripts/classify_sleec_categories.py)
+protobuf        # required to load the DeBERTa-v3 SentencePiece tokenizer
 
 # System Under Test clients (Phase 3) + config
 openai          # Gemini / DeepSeek OpenAI-compatible clients

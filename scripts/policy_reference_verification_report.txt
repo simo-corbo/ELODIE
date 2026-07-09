@@ -1,0 +1,177 @@
+==============================================================================
+POLICY REFERENCE VERIFICATION REPORT
+==============================================================================
+Rules file : /Users/francesconegri/PycharmProjects/NeroBali/data/sleec_rules.json
+HTML dir   : /Users/francesconegri/PycharmProjects/NeroBali/data
+
+OK CSAM_EXPLOITATION  (CHILD_SAFETY)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK MINOR_ENDANGERMENT  (CHILD_SAFETY)
+    [PASS ] anthropic 3/3 segments
+    [PASS ] openai    5/5 segments
+
+OK WEAPONS_CBRN  (DANGEROUS_ILLEGAL)
+    [PASS ] anthropic 2/2 segments
+    [PASS ] openai    1/1 segments
+
+OK ILLEGAL_ACTIVITIES_SUBSTANCES  (DANGEROUS_ILLEGAL)
+    [PASS ] anthropic 2/2 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK HUMAN_TRAFFICKING  (DANGEROUS_ILLEGAL)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+
+OK FRAUDULENT_DOCUMENTS_GOODS  (DANGEROUS_ILLEGAL)
+    [PASS ] anthropic 2/2 segments
+
+OK REAL_MONEY_GAMBLING  (DANGEROUS_ILLEGAL)
+    [PASS ] openai    1/1 segments
+
+OK SPAM_PHISHING_MALWARE  (SECURITY_COMPROMISE)
+    [PASS ] anthropic 3/3 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK UNAUTHORIZED_SYSTEM_ACCESS  (SECURITY_COMPROMISE)
+    [PASS ] anthropic 3/3 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK CRITICAL_INFRASTRUCTURE  (SECURITY_COMPROMISE)
+    [PASS ] anthropic 2/2 segments
+    [PASS ] openai    1/1 segments
+
+OK CIRCUMVENT_SAFETY_FILTERS  (SECURITY_COMPROMISE)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK VIOLENT_EXTREMISM  (VIOLENCE_HATE)
+    [PASS ] anthropic 2/2 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK VIOLENCE_INCITEMENT  (VIOLENCE_HATE)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK HATE_SPEECH  (VIOLENCE_HATE)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK SELF_HARM  (HARMFUL_CONTENT)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK HARASSMENT_BULLYING  (HARMFUL_CONTENT)
+    [PASS ] anthropic 2/2 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK GRAPHIC_VIOLENCE_ANIMAL_CRUELTY  (HARMFUL_CONTENT)
+    [PASS ] anthropic 2/2 segments
+
+OK SEXUALLY_EXPLICIT_CONTENT  (HARMFUL_CONTENT)
+    [PASS ] anthropic 3/3 segments
+    [PASS ] gemini    1/1 segments
+
+OK NON_CONSENSUAL_INTIMATE_IMAGERY  (HARMFUL_CONTENT)
+    [PASS ] openai    2/2 segments
+    [PASS ] gemini    1/1 segments
+
+OK PRIVACY_IP_RIGHTS  (PRIVACY_RIGHTS_SURVEILLANCE)
+    [PASS ] anthropic 2/2 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK UNAUTHORIZED_TRACKING  (PRIVACY_RIGHTS_SURVEILLANCE)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK BIOMETRIC_CATEGORIZATION  (PRIVACY_RIGHTS_SURVEILLANCE)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    2/2 segments
+
+OK SOCIAL_SCORING  (PRIVACY_RIGHTS_SURVEILLANCE)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+
+OK EMOTION_RECOGNITION  (PRIVACY_RIGHTS_SURVEILLANCE)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+
+OK GOVERNMENT_CENSORSHIP  (PRIVACY_RIGHTS_SURVEILLANCE)
+    [PASS ] anthropic 2/2 segments
+
+OK CRIMINAL_JUSTICE_DECISIONS  (PRIVACY_RIGHTS_SURVEILLANCE)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+
+OK FRAUD_SCAMS  (MISINFORMATION_DECEPTION)
+    [PASS ] anthropic 2/2 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK IMPERSONATION  (MISINFORMATION_DECEPTION)
+    [PASS ] anthropic 2/2 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK MISLEADING_EXPERTISE  (MISINFORMATION_DECEPTION)
+    [PASS ] gemini    1/1 segments
+
+OK HEALTH_GOV_MISINFORMATION  (MISINFORMATION_DECEPTION)
+    [PASS ] anthropic 2/2 segments
+    [PASS ] gemini    1/1 segments
+
+OK MISREPRESENT_AI_PROVENANCE  (MISINFORMATION_DECEPTION)
+    [PASS ] anthropic 1/1 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+OK MANIPULATION_EXPLOITATION  (MISINFORMATION_DECEPTION)
+    [PASS ] anthropic 4/4 segments
+    [PASS ] openai    1/1 segments
+
+>> HIGH_RISK_AUTOMATED_DECISION  (HIGH_RISK_DECISIONS)
+    [FAIL ] anthropic 0/1 segments
+          - UNMATCHED (word-coverage 100%): "High-Risk Use Cases (legal, healthcare, insurance, finance, employment and housing, aca..."
+            longest verbatim run on page: "high risk use cases"
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+>> UNLICENSED_PROFESSIONAL_ADVICE  (HIGH_RISK_DECISIONS)
+    [FAIL ] anthropic 0/2 segments
+          - UNMATCHED (word-coverage 100%): "Human-in-the-loop: when using our products to provide advice, recommendations, or in su..."
+            longest verbatim run on page: "to provide advice recommendations or in subjective decision making directly affecting i..."
+          - UNMATCHED (word-coverage 89%): "Disclosure: you must disclose that AI is being used."
+            longest verbatim run on page: "you must disclose"
+    [PASS ] openai    1/1 segments
+
+OK ELECTION_INTEGRITY  (DEMOCRATIC_PROCESS)
+    [PASS ] anthropic 4/4 segments
+    [PASS ] openai    1/1 segments
+    [PASS ] gemini    1/1 segments
+
+==============================================================================
+SUMMARY
+------------------------------------------------------------------------------
+  References checked : 82
+  PASS               : 80
+  PARTIAL            : 0
+  FAIL               : 2
+  NO_HTML            : 0
+
+  Rules needing review (2):
+    - HIGH_RISK_AUTOMATED_DECISION
+    - UNLICENSED_PROFESSIONAL_ADVICE
+==============================================================================
