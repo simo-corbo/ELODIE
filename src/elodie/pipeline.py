@@ -79,11 +79,23 @@ class ResponseRecord:
                    rules=list(d.get("rules", [])), exploit=dict(d.get("exploit", {})))
 
 
-def collect_responses(tasks: list[ScoringTask], sut: SUT, *, verbose: bool = True) -> list[ResponseRecord]:
+def collect_responses(
+    tasks: list[ScoringTask],
+    sut: SUT,
+    *,
+    verbose: bool = True,
+    resume_path: str | Path | None = None,
+) -> list[ResponseRecord]:
     """Phase A: run the SUT once per unique prompt, collecting responses.
 
     Tasks that share a prompt are merged (the SUT is deterministic in Q), so a
     prompt tested against several rules still costs a single inference.
+
+    When ``resume_path`` is given, each response is appended to that JSONL file
+    the moment it is produced, and any prompts already recorded there (from an
+    earlier, possibly interrupted run over the same tasks) are reloaded and not
+    re-sent to the SUT. This makes a long SUT phase crash- and Ctrl-C-safe: a
+    rerun picks up where it left off instead of re-querying every prompt.
     """
     merged: dict[str, dict[str, float | None]] = {}
     order: list[str] = []
@@ -94,16 +106,53 @@ def collect_responses(tasks: list[ScoringTask], sut: SUT, *, verbose: bool = Tru
         for rid, exploit in rule_exploits:
             merged[prompt].setdefault(rid, exploit)
 
+    # Resume: reload prompts already answered in a prior run so we neither
+    # re-query the SUT nor lose that work to an earlier crash.
+    done: dict[str, ResponseRecord] = {}
+    if resume_path is not None and Path(resume_path).exists():
+        for rec in load_responses(resume_path, tolerant=True):
+            done[rec.prompt] = rec
+        if verbose and done:
+            print(f"  resuming: {len(done)} prompts already answered in {resume_path}")
+
+    fh = None
+    if resume_path is not None:
+        path = Path(resume_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # If a prior crash left a truncated final line (no trailing newline),
+        # start on a fresh line so the next record can't be glued onto it —
+        # that way a partial line only ever damages itself.
+        needs_newline = False
+        if path.exists() and path.stat().st_size > 0:
+            with path.open("rb") as rf:
+                rf.seek(-1, 2)
+                needs_newline = rf.read(1) != b"\n"
+        fh = path.open("a", encoding="utf-8")
+        if needs_newline:
+            fh.write("\n")
+
     records: list[ResponseRecord] = []
-    for prompt in tqdm(order, desc="SUT", unit="prompt", disable=not verbose):
-        response = sut(prompt)
-        rmap = merged[prompt]
-        records.append(ResponseRecord(
-            prompt=prompt,
-            response=response,
-            rules=list(rmap),
-            exploit={rid: e for rid, e in rmap.items() if e is not None},
-        ))
+    try:
+        for prompt in tqdm(order, desc="SUT", unit="prompt", disable=not verbose):
+            cached = done.get(prompt)
+            if cached is not None:
+                records.append(cached)
+                continue
+            response = sut(prompt)
+            rmap = merged[prompt]
+            record = ResponseRecord(
+                prompt=prompt,
+                response=response,
+                rules=list(rmap),
+                exploit={rid: e for rid, e in rmap.items() if e is not None},
+            )
+            records.append(record)
+            if fh is not None:
+                fh.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+                fh.flush()
+    finally:
+        if fh is not None:
+            fh.close()
     return records
 
 
@@ -116,14 +165,25 @@ def save_responses(responses: list[ResponseRecord], path: str | Path) -> None:
             f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
 
 
-def load_responses(path: str | Path) -> list[ResponseRecord]:
-    """Read back a responses JSONL file (to resume from Phase B without the SUT)."""
+def load_responses(path: str | Path, *, tolerant: bool = False) -> list[ResponseRecord]:
+    """Read back a responses JSONL file (to resume from Phase B without the SUT).
+
+    With ``tolerant=True``, lines that fail to parse are skipped rather than
+    raising — a crash mid-append can leave a truncated final line, and we still
+    want every complete record before it.
+    """
     records = []
     with Path(path).open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 records.append(ResponseRecord.from_dict(json.loads(line)))
+            except (json.JSONDecodeError, KeyError, TypeError):
+                if tolerant:
+                    continue
+                raise
     return records
 
 
@@ -295,8 +355,14 @@ def _run_phases(
     """
     if prompt_scores_path is None and out is not None:
         prompt_scores_path = out.parent / "prompt_scores.jsonl"
-    responses = collect_responses(tasks, sut, verbose=verbose)
+    responses = collect_responses(
+        tasks, sut, verbose=verbose,
+        resume_path=(out / "responses.jsonl") if out is not None else None,
+    )
     if out is not None:
+        # collect_responses streamed each record as it was produced (crash-safe);
+        # this final pass rewrites the file cleanly (ordered, deduped, no partial
+        # trailing line from an interrupted run).
         save_responses(responses, out / "responses.jsonl")
     scores = score_responses(oracle, responses, rules_by_id,
                              prompt_scores_path=prompt_scores_path, verbose=verbose)

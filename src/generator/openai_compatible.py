@@ -58,4 +58,14 @@ class OpenAICompatibleClient(LLMClient):
             max_tokens=self.max_tokens,
             extra_body=self.extra_body,
         )
-        return (response.choices[0].message.content or "").strip()
+        # Providers may return a choice with no message (or a null-content
+        # message) when a response is blocked by a safety filter or finishes
+        # empty — common for Gemini on adversarial prompts. Treat that as an
+        # empty response (a refusal) rather than crashing the whole run.
+        choices = response.choices or []
+        if not choices:
+            return ""
+        message = choices[0].message
+        if message is None:
+            return ""
+        return (message.content or "").strip()
