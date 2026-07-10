@@ -179,26 +179,9 @@ def main() -> None:
             output_dir=output_dir,
             complete=args.complete,
         )
+        _print_overall(result)
     else:
-        from elodie.prompt_generation import generate_prompts
-
-        num_prompts = args.num_prompts or config.generator.get("num_prompts", 10)
-        gen_model = config.generator.get("model", "gemini-2.5-pro")
-        print(f"Rule-centric: generating {num_prompts} prompts/rule via {gen_model}.\n")
-
-        def generate_fn(rule):
-            return generate_prompts(rule, num_prompts, model=gen_model)
-
-        result = run_pipeline(
-            oracle=oracle,
-            rules=rules,
-            generate_fn=generate_fn,
-            sut=sut,
-            thresholds=config.thresholds,
-            output_dir=output_dir,
-        )
-
-    _print_overall(result)
+        print("File not specified")
 
 
 if __name__ == "__main__":
