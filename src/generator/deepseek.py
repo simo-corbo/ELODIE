@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .openai_compatible import OpenAICompatibleClient
 
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_BASE_URL = "https://router.huggingface.co/v1"
 
 
 class DeepSeekClient(OpenAICompatibleClient):
@@ -12,13 +12,17 @@ class DeepSeekClient(OpenAICompatibleClient):
 
     def __init__(
         self,
-        model: str = "deepseek-chat",
-        *,
+        model="deepseek-ai/DeepSeek-V3.2:fastest",
         api_key: str | None = None,
         base_url: str = DEEPSEEK_BASE_URL,
-        temperature: float = 0.7,
-        max_tokens: int = 512,
+        temperature: float = 1,
+        max_tokens: int = 2048,
         name: str | None = None,
+        extra_body={
+                "thinking": {
+                    "type": "disabled"
+                }
+            },
     ) -> None:
         super().__init__(
             model,
@@ -28,4 +32,5 @@ class DeepSeekClient(OpenAICompatibleClient):
             temperature=temperature,
             max_tokens=max_tokens,
             name=name,
+            extra_body=extra_body
         )

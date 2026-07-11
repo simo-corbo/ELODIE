@@ -25,7 +25,7 @@ class OpenAICompatibleClient(LLMClient):
         temperature: float = 0.7,
         max_tokens: int = 512,
         name: str | None = None,
-        extra_body: dict | None = None,
+        extra_body: dict  = None,
     ) -> None:
         super().__init__(model, temperature=temperature, max_tokens=max_tokens, name=name)
         key = api_key or (os.getenv(api_key_env) if api_key_env else None)
