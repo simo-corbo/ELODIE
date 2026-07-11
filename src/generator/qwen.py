@@ -32,3 +32,4 @@ class QwenClient(OpenAICompatibleClient):
             extra_body=extra_body,
             prefix=prefix
         )
+
