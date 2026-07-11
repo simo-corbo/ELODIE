@@ -29,5 +29,6 @@ class QwenClient(OpenAICompatibleClient):
             temperature=temperature,
             max_tokens=max_tokens,
             name=name,
-            extra_body=extra_body
+            extra_body=extra_body,
+            prefix=prefix
         )
