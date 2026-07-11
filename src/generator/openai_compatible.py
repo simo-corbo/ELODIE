@@ -26,6 +26,7 @@ class OpenAICompatibleClient(LLMClient):
         max_tokens: int = 512,
         name: str | None = None,
         extra_body: dict  = None,
+        prefix=""
     ) -> None:
         super().__init__(model, temperature=temperature, max_tokens=max_tokens, name=name)
         key = api_key or (os.getenv(api_key_env) if api_key_env else None)
@@ -39,6 +40,7 @@ class OpenAICompatibleClient(LLMClient):
         from openai import OpenAI
 
         self._client = OpenAI(api_key=key, base_url=base_url)
+        self.prefix = prefix
 
     def generate(
         self,
@@ -50,6 +52,7 @@ class OpenAICompatibleClient(LLMClient):
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
+        prompt=self.prefix + prompt
         messages.append({"role": "user", "content": prompt})
         response = self._client.chat.completions.create(
             model=self.model,

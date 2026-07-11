@@ -18,9 +18,8 @@ class QwenClient(OpenAICompatibleClient):
         temperature: float = 1,
         max_tokens: int = 2048,
         name: str | None = None,
-        extra_body={
-            "enable_thinking": False,
-        },
+        extra_body=None,
+        prefix="/no_think\n"
     ) -> None:
         super().__init__(
             model,

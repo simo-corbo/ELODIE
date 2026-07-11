@@ -7,6 +7,7 @@ from .deepseek import DeepSeekClient
 from .gemini import GeminiClient
 from .local_llm import LocalLLMClient
 from .openai_compatible import OpenAICompatibleClient
+from .qwen import QwenClient
 
 _REGISTRY = {
     "gemini": GeminiClient,
@@ -14,6 +15,7 @@ _REGISTRY = {
     "local": LocalLLMClient,
     "local_llm": LocalLLMClient,
     "vllm": LocalLLMClient,
+    "qwen": QwenClient,
 }
 
 
@@ -42,4 +44,5 @@ __all__ = [
     "DeepSeekClient",
     "LocalLLMClient",
     "build_llm",
+    "qwen"
 ]
