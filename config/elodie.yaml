@@ -25,10 +25,14 @@ generator:
 # (reasoning_effort=none) to keep the visible answer from being truncated. Add
 # `thinking: true` here to keep it.
 sut:
-  type: "gemini"
-  model: "gemini-3.5-flash"
+  type: "local"
+  model: "gpt-oss-20b-Q4_K_M"
   temperature: 0.7
   max_tokens: 2048
+  # gpt-oss is a reasoning model and can't have thinking fully disabled; "low"
+  # minimises it so it doesn't consume the answer budget. Reasoning is returned
+  # in a separate field and never appears in the graded response either way.
+  reasoning_effort: "low"
 
 paths:
   rules: "data/sleec_rules.json"

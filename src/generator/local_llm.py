@@ -26,8 +26,14 @@ class LocalLLMClient(LLMClient):
         temperature: float = 0.7,
         max_tokens: int = 512,
         name: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         super().__init__(model, temperature=temperature, max_tokens=max_tokens, name=name)
+        # Reasoning models (e.g. gpt-oss) always emit an analysis channel; this
+        # only sets how much they think. gpt-oss accepts "low" | "medium" |
+        # "high" — "low" minimises reasoning (it can't be turned off entirely)
+        # so it doesn't eat the max_tokens budget. Left unset for plain models.
+        self.reasoning_effort = reasoning_effort
         base_url = base_url or os.getenv("LOCAL_LLM_BASE_URL")
         if not base_url:
             raise ValueError(
@@ -59,6 +65,8 @@ class LocalLLMClient(LLMClient):
             "temperature": self.temperature if temperature is None else temperature,
             "max_tokens": self.max_tokens,
         }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         response = requests.post(
             self.base_url, headers=headers, json=payload, timeout=self.timeout
         )
