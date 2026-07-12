@@ -3,3 +3,9 @@
 
 /.claude/
 /.idea
+
+/outputs/deepseek-deepseek-ai-deepseek-v4-flash-fastest
+/outputs/qwen-qwen-qwen3-32b-groq
+/outputs/gemini-gemini-3.5-flash
+/outputs/localllm-llama-3.1-8b-instruct
+/outputs/localllm-gpt-oss-20b-q4_k_m
