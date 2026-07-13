@@ -1,0 +1,52 @@
+{
+  "selected_total": 240,
+  "candidate_counts": {
+    "G1_ANTECEDENT": {
+      "borderline": 658151,
+      "low": 7743675,
+      "high": 752739
+    },
+    "G2_DEFEATER": {
+      "high": 463015,
+      "low": 132463,
+      "borderline": 37065
+    },
+    "G3_BASE_CONSEQUENT": {
+      "borderline": 105699,
+      "high": 452425,
+      "low": 90743
+    },
+    "G3_DEFEATER_CONSEQUENT": {
+      "high": 568634,
+      "borderline": 52413,
+      "low": 11496
+    }
+  },
+  "selected_counts": {
+    "G1_ANTECEDENT": {
+      "borderline": 20,
+      "high": 20,
+      "low": 20
+    },
+    "G2_DEFEATER": {
+      "borderline": 20,
+      "high": 20,
+      "low": 20
+    },
+    "G3_BASE_CONSEQUENT": {
+      "borderline": 20,
+      "high": 20,
+      "low": 20
+    },
+    "G3_DEFEATER_CONSEQUENT": {
+      "borderline": 20,
+      "high": 20,
+      "low": 20
+    }
+  },
+  "score_bands": {
+    "low": "[0.00, 0.30)",
+    "borderline": "[0.30, 0.70]",
+    "high": "(0.70, 1.00]"
+  }
+}
