@@ -11,3 +11,4 @@
 /outputs/localllm-gpt-oss-20b-q4_k_m
 
 /plots/.ipynb_checkpoints
+/outputs/wildjailbreak/wildjailbreak_category_scores_entail.json
