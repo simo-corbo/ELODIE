@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -35,11 +35,15 @@ class PromptRecord:
 
     ``rule_scores`` is the ``{rule_id: P(A|Q)}`` map straight from the cache,
     keyed by the same ``rule_id`` values used in ``sleec_rules.json``.
+    ``rule_score_ms`` mirrors it with the latency of each Gate-1 call, so the cost
+    of the precompute is carried into the run rather than lost with it. It is empty
+    for a cache written before timings were recorded.
     """
 
     prompt: str                    # Q
     rule_scores: dict[str, float]  # {rule_id: P(A|Q)} over every scored rule
     data_type: str = "unknown"     # WildJailbreak provenance label, if any
+    rule_score_ms: dict[str, float] = field(default_factory=dict)  # {rule_id: Gate-1 ms}
 
     def triggered_rules(self, threshold: float) -> list[str]:
         """Rule ids whose Gate-1 score clears tau_1, strongest first."""
@@ -61,6 +65,8 @@ def load_prompt_records(path: str | Path) -> list[PromptRecord]:
             prompt=rec["prompt"],
             rule_scores={rid: float(s) for rid, s in (rec.get("rule_scores") or {}).items()},
             data_type=rec.get("data_type", "unknown"),
+            rule_score_ms={rid: float(ms)
+                           for rid, ms in (rec.get("rule_score_ms") or {}).items()},
         )
         for rec in payload.get("prompts", [])
         if rec.get("prompt")

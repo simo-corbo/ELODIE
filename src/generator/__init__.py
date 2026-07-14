@@ -5,6 +5,7 @@ from __future__ import annotations
 from .base import LLMClient
 from .deepseek import DeepSeekClient
 from .gemini import GeminiClient
+from .llama import LlamaClient
 from .local_llm import LocalLLMClient
 from .openai_compatible import OpenAICompatibleClient
 from .qwen import QwenClient
@@ -16,6 +17,7 @@ _REGISTRY = {
     "local_llm": LocalLLMClient,
     "vllm": LocalLLMClient,
     "qwen": QwenClient,
+    "llama": LlamaClient,
 }
 
 
@@ -44,5 +46,6 @@ __all__ = [
     "DeepSeekClient",
     "LocalLLMClient",
     "build_llm",
-    "qwen"
+    "QwenClient",
+    "LlamaClient"
 ]

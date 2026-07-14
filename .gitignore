@@ -11,5 +11,8 @@
 /outputs/localllm-gpt-oss-20b-q4_k_m
 
 /plots/.ipynb_checkpoints
+
+/outputs/wildjailbreak/*.json
+/outputs/prompt_scores.jsonl
 /outputs/wildjailbreak/wildjailbreak_category_scores_entail.json
 /outputs/oracle_annotation/annotation_sample_annotator_A.numbers

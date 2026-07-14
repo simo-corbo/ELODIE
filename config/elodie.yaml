@@ -25,8 +25,8 @@ generator:
 # (reasoning_effort=none) to keep the visible answer from being truncated. Add
 # `thinking: true` here to keep it.
 sut:
-  type: "qwen"
-  model: "Qwen/Qwen3-32B:groq"
+  type: "local"
+  model: "llama-3.1-8B-Instruct"
   temperature: 0.7
   max_tokens: 2048
 

@@ -48,8 +48,9 @@ GenerateFn = Callable[[SleecRule], list[str]]
 SUT = Callable[[str], str]
 
 # One unit of work handed to Phase A: a prompt and the rules to score it against,
-# each paired with a precomputed Gate-1 score (or None to score it in Phase B).
-ScoringTask = tuple[str, list[tuple[str, float | None]]]
+# each paired with a precomputed Gate-1 score and that score's latency (either may
+# be None — no cached score, or a cached score whose cost was never recorded).
+ScoringTask = tuple[str, list[tuple[str, float | None, float | None]]]
 
 
 # --------------------------------------------------------------------------- #
@@ -62,21 +63,29 @@ class ResponseRecord:
     Keyed by prompt (the SUT response depends only on Q), with the rules the
     prompt should be scored against and any precomputed Gate-1 scores carried
     alongside so Phase B need not re-derive them.
+
+    ``exploit_ms`` mirrors ``exploit`` key for key: the latency of the Gate-1 call
+    that produced each cached score. It travels with the score so a cost that was
+    paid once, in the corpus precompute, is not lost by the time the case reaches
+    ``scores.jsonl``. Empty when the corpus recorded no timings.
     """
 
     prompt: str
     response: str
     rules: list[str]
     exploit: dict[str, float] = field(default_factory=dict)
+    exploit_ms: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {"prompt": self.prompt, "response": self.response,
-                "rules": self.rules, "exploit": self.exploit}
+                "rules": self.rules, "exploit": self.exploit,
+                "exploit_ms": self.exploit_ms}
 
     @classmethod
     def from_dict(cls, d: dict) -> "ResponseRecord":
         return cls(prompt=d["prompt"], response=d["response"],
-                   rules=list(d.get("rules", [])), exploit=dict(d.get("exploit", {})))
+                   rules=list(d.get("rules", [])), exploit=dict(d.get("exploit", {})),
+                   exploit_ms=dict(d.get("exploit_ms", {})))
 
 
 def collect_responses(
@@ -97,14 +106,14 @@ def collect_responses(
     re-sent to the SUT. This makes a long SUT phase crash- and Ctrl-C-safe: a
     rerun picks up where it left off instead of re-querying every prompt.
     """
-    merged: dict[str, dict[str, float | None]] = {}
+    merged: dict[str, dict[str, tuple[float | None, float | None]]] = {}
     order: list[str] = []
     for prompt, rule_exploits in tasks:
         if prompt not in merged:
             merged[prompt] = {}
             order.append(prompt)
-        for rid, exploit in rule_exploits:
-            merged[prompt].setdefault(rid, exploit)
+        for rid, exploit, exploit_ms in rule_exploits:
+            merged[prompt].setdefault(rid, (exploit, exploit_ms))
 
     # Resume: reload prompts already answered in a prior run so we neither
     # re-query the SUT nor lose that work to an earlier crash.
@@ -144,7 +153,8 @@ def collect_responses(
                 prompt=prompt,
                 response=response,
                 rules=list(rmap),
-                exploit={rid: e for rid, e in rmap.items() if e is not None},
+                exploit={rid: e for rid, (e, _) in rmap.items() if e is not None},
+                exploit_ms={rid: ms for rid, (_, ms) in rmap.items() if ms is not None},
             )
             records.append(record)
             if fh is not None:
@@ -229,7 +239,8 @@ def score_responses(
             key = (rid, rec.prompt)
             ps = index.get(key)
             if ps is None:  # prompt half not cached yet -> score it once and keep it
-                ps = score_prompt(oracle, rule, rec.prompt, exploit=rec.exploit.get(rid))
+                ps = score_prompt(oracle, rule, rec.prompt, exploit=rec.exploit.get(rid),
+                                  exploit_ms=rec.exploit_ms.get(rid))
                 index[key] = ps
                 computed_prompt_side += 1
             scores.append(score_response(oracle, rule, ps, rec.response))
@@ -263,8 +274,26 @@ def resolve_scores(
     return cases_by_rule
 
 
+def gate_timings(cases: list[CaseResult]) -> dict:
+    """Per-gate oracle latency over ``cases``: how many were measured, mean and total ms.
+
+    Reported per gate rather than as one number, because the gates are not paid
+    alike: Gates 1 and 2 are prompt-side (scored once and reused by every SUT),
+    while Gate 3 is response-side and paid again for each SUT. ``total_ms`` is the
+    measured cost of that gate over these cases; a gate nobody measured is absent.
+    """
+    out: dict[str, dict] = {}
+    for gate, attr in (("gate1_exploit", "gate1_ms"), ("gate2_defeater", "gate2_ms"),
+                       ("gate3_b_compliance", "gate3_b_ms"),
+                       ("gate3_bd_compliance", "gate3_bd_ms"), ("all_gates", "oracle_ms")):
+        ms = [v for v in (getattr(c, attr) for c in cases) if v is not None]
+        if ms:
+            out[gate] = {"n_measured": len(ms), "mean_ms": sum(ms) / len(ms), "total_ms": sum(ms)}
+    return out
+
+
 def rule_metrics(cases: list[CaseResult]) -> dict:
-    """Summarise a rule's cases (EVR / RVR / MAS + verdict counts)."""
+    """Summarise a rule's cases (EVR / RVR / MAS + verdict counts + gate latency)."""
     if not cases:
         return {"n_cases": 0}
     valid = [c for c in cases if c.exploit_valid]
@@ -280,6 +309,7 @@ def rule_metrics(cases: list[CaseResult]) -> dict:
         ),
         "mean_adherence_score": (sum(scored) / len(scored) if scored else None),
         "verdicts": dict(Counter(c.verdict.value for c in cases)),
+        "gate_timings_ms": gate_timings(cases),
     }
 
 
@@ -396,7 +426,7 @@ def run_pipeline(
         if verbose:
             print(f"Generating prompts for {rule.rule_id}...")
         for prompt in generate_fn(rule):
-            tasks.append((prompt, [(rule.rule_id, None)]))
+            tasks.append((prompt, [(rule.rule_id, None, None)]))  # Gate 1 is scored in Phase B
 
     return _run_phases(oracle, tasks, rules_by_id, sut, thresholds, out, verbose,
                        prompt_scores_path=prompt_scores_path, mode="rule_centric")
@@ -434,7 +464,8 @@ def run_prompt_centric(
         else:
             rids = [rid for rid in rec.triggered_rules(thresholds.exploit) if rid in rules_by_id]
         if rids:
-            tasks.append((rec.prompt, [(rid, rec.rule_scores.get(rid)) for rid in rids]))
+            tasks.append((rec.prompt, [(rid, rec.rule_scores.get(rid), rec.rule_score_ms.get(rid))
+                                       for rid in rids]))
 
     return _run_phases(oracle, tasks, rules_by_id, sut, thresholds, out, verbose,
                        prompt_scores_path=prompt_scores_path,
