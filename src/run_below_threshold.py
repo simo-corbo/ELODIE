@@ -1,37 +1,37 @@
 """ELODIE negative control: run the pipeline on prompts that *fail* Gate 1.
 
-The ordinary prompt-centric pipeline (``run_pipeline.py``) tests each corpus
-prompt against the rules it **triggers** — the rules whose cached Gate-1 score
-P(A|Q) clears tau_1. This script is its mirror image: same corpus, same oracle,
-same SUTs, same gates, same timings, but it selects the prompts that clear tau_1
-for **no** rule at all, and tests each against the rule it comes *closest* to
-triggering (its argmax over rules, still below tau_1 — the near miss).
+The ordinary prompt-centric run (``run_pipeline.py``) tests each corpus prompt
+against the rules it **triggers** — those whose cached Gate-1 score P(A|Q) clears
+tau_1. This is its mirror image: same corpus, same oracle, same gates, same
+timings, same SUTs, but it selects the prompts that clear tau_1 for **no** rule,
+and tests each against the rule it comes *closest* to triggering (its argmax,
+still below tau_1 — the near miss).
 
 Every case therefore fails Gate 1 by construction and resolves to
-``vacuous_pass``. That is the point: this is the negative control. The
-interesting columns are Gate 3 (does the SUT still answer safely when the prompt
-was never adversarial?) and the per-gate timings, which are directly comparable
-to the ``results.csv`` produced by the ordinary run.
+``vacuous_pass``. That is the point: it is the negative control. What the run
+measures is Gate 3 — does the SUT still answer safely when the prompt was never
+adversarial? — and the per-gate latencies, which are directly comparable to the
+positive run's because they come from the very same code.
 
-Everything expensive is reused from :mod:`elodie`: prompt selection, the SUT
-phase (``collect_responses``, resumable), gate scoring (``score_prompt`` /
-``score_response``), and threshold resolution (``CaseScores.resolve``). Only the
-selection predicate and the timing instrumentation are new.
+Nothing here re-implements the pipeline. Selection is the only new logic; Phase A
+(``collect_responses``), Phase B (``score_responses``) and Phase C
+(``resolve_scores``) are the pipeline's own, so a case is scored, timed and
+resolved by exactly the code that produced ``results.csv``.
 
-Output — one file, the same 18 columns as ``results.csv``, in the SUT's folder:
+Output — one CSV, the same columns as ``results.csv``, in the SUT's own folder:
 
     outputs/<sut-slug>/results_below_threshold.csv
 
-Two caches sit alongside it so a rerun (or the next SUT) is cheap:
+Alongside it, two caches make a rerun (and the next SUT) cheap:
 
-    outputs/.gate_timings/prompt_side_below.jsonl   Gate 1/2 scores + ms, shared
-                                                    by every SUT (prompt-side is
-                                                    SUT-independent)
-    outputs/<sut-slug>/.below_threshold_responses.jsonl   crash-safe SUT resume
+    outputs/prompt_scores_below_threshold.jsonl        Gate 1/2 scores + latencies,
+                                                       SUT-independent, shared by
+                                                       every SUT
+    outputs/<sut-slug>/.below_threshold_responses.jsonl  crash-safe SUT resume
 
 Usage:
     python run_below_threshold.py                                  # config's SUT
-    python run_below_threshold.py --sut deepseek --sut-model deepseek-ai/DeepSeek-V3.2:fastest
+    python run_below_threshold.py --sut qwen --sut-model Qwen/Qwen3-32B:groq
     python run_below_threshold.py --max-prompts 10000 --stratify   # balanced sample
     python run_below_threshold.py --rules-per-prompt 3             # 3 nearest misses
 """
@@ -39,93 +39,30 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
-import json
-import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from tqdm import tqdm
 
 from elodie.config import DEFAULT_CONFIG_PATH, load_config
-from elodie.evaluation import (
-    RESULT_COLUMNS,
-    CaseScores,
-    DefeaterScore,
-    PromptScores,
-    Thresholds,
-    _result_row,
-    score_prompt,
-    score_response,
+from elodie.evaluation import save_results
+from elodie.oracle import DebertaOracle
+from elodie.pipeline import (
+    ScoringTask,
+    collect_responses,
+    gate_timings,
+    resolve_scores,
+    score_responses,
 )
-from elodie.oracle import DebertaOracle, Oracle
-from elodie.pipeline import collect_responses
-from elodie.prompt_dataset import PromptRecord, load_prompt_records, _stratified_sample
-from elodie.rules import SleecRule, get_rule, load_rules
+from elodie.prompt_dataset import PromptRecord, _stratified_sample, load_prompt_records
+from elodie.rules import get_rule, load_rules
 from generator import build_llm
 from run_pipeline import _sut_slug
 
-# The ordinary run's default sample size (see any outputs/*/summary.json), kept
-# so the negative control costs the same number of SUT calls as the positive one.
+# The positive run's sample size (see any outputs/*/summary.json), so the negative
+# control costs the same number of SUT calls as the run it is compared against.
 DEFAULT_MAX_PROMPTS = 10_000
 
-# results.csv carries a per-gate latency next to each gate's score, plus the
-# whole-case oracle total. Same order, so the two CSVs line up column for column.
-TIMING_COLUMNS = {
-    "gate1_threshold": "gate1_ms",
-    "gate2_threshold": "gate2_ms",
-    "gate3_b_threshold": "gate3_b_ms",
-    "gate3_bd_threshold": "gate3_bd_ms",
-}
 
-
-def _timed_columns() -> list[str]:
-    """RESULT_COLUMNS with each gate's ``*_ms`` inserted after its threshold."""
-    columns: list[str] = []
-    for name in RESULT_COLUMNS:
-        columns.append(name)
-        if name in TIMING_COLUMNS:
-            columns.append(TIMING_COLUMNS[name])
-        if name == "gate3_bd_threshold":
-            columns.append("oracle_ms")  # sum of the four gate timings
-    return columns
-
-
-RESULT_COLUMNS_TIMED = _timed_columns()
-
-
-class TimedOracle(Oracle):
-    """Oracle decorator that records the wall-clock cost of every scored pair.
-
-    The gates call the oracle from inside ``score_prompt`` / ``score_response``,
-    so rather than re-implement them we wrap the oracle and look each call's
-    latency back up by its ``(premise, hypothesis)`` pair — which is exactly what
-    identifies a gate: Gate 1 is (Q, antecedent), Gate 2 (Q, defeater), Gate 3
-    (R, consequent). ``reset()`` between cases keeps the map small.
-    """
-
-    def __init__(self, inner: Oracle) -> None:
-        self.inner = inner
-        self.calls: dict[tuple[str, str], float] = {}
-
-    def score(self, premise: str, hypothesis: str) -> float:
-        start = time.perf_counter()
-        value = self.inner.score(premise, hypothesis)
-        self.calls[(premise, hypothesis)] = (time.perf_counter() - start) * 1000
-        return value
-
-    def reset(self) -> None:
-        self.calls.clear()
-
-    def ms(self, premise: str, hypothesis: str) -> float | None:
-        """Latency of that pair, or None if the gate short-circuited (no call)."""
-        return self.calls.get((premise, hypothesis))
-
-
-# --------------------------------------------------------------------------- #
-# Selection: the prompts the ordinary pipeline threw away.
-# --------------------------------------------------------------------------- #
 def select_below_threshold(
     records: list[PromptRecord],
     threshold: float,
@@ -137,24 +74,26 @@ def select_below_threshold(
 ) -> list[tuple[PromptRecord, list[str]]]:
     """Pick prompts that trigger **no** rule, each paired with its nearest misses.
 
-    A prompt qualifies when every rule under test scores below tau_1 — these are
-    precisely the prompts ``select_prompts`` calls *unassigned* and drops. Each
-    one is assigned to the ``rules_per_prompt`` rules it scores highest on (still
-    all below tau_1), mirroring the ordinary run's argmax assignment.
+    A prompt qualifies when every rule under test scores below tau_1 — precisely
+    the prompts ``select_prompts`` calls *unassigned* and drops. Each is then
+    assigned to the ``rules_per_prompt`` rules it scores highest on (all still
+    below tau_1), mirroring the ordinary run's argmax assignment.
 
-    Ordering matches the ordinary pipeline's: strongest-triggering first, i.e.
-    the prompts sitting just under the threshold — the hardest negatives — unless
-    ``stratify`` fills the cap round-robin across the assigned rules instead.
+    Ordering mirrors it too: strongest-scoring first, so a cap keeps the prompts
+    sitting just under the threshold — the hardest negatives, the ones the corpus
+    came closest to counting as exploits. ``stratify`` instead fills the cap
+    round-robin across the nearest-miss rules, for a sample balanced over rules
+    rather than dominated by whichever rules own the closest calls.
     """
     targets = set(rule_ids)
 
-    # (nearest_rule, its_score, record) — reusing the shape _stratified_sample wants.
+    # (nearest_rule, its_score, record) — the shape _stratified_sample expects.
     assigned: list[tuple[str | None, float, PromptRecord]] = []
     nearest: dict[str, list[str]] = {}
     for rec in records:
         scores = {rid: s for rid, s in rec.rule_scores.items() if rid in targets}
         if not scores or any(s >= threshold for s in scores.values()):
-            continue  # no scores, or it triggers something -> the ordinary run's job
+            continue  # unscored, or it triggers something — the positive run's job
         ranked = sorted(scores, key=lambda rid: scores[rid], reverse=True)
         top = ranked[:rules_per_prompt]
         assigned.append((top[0], scores[top[0]], rec))
@@ -168,114 +107,6 @@ def select_below_threshold(
         chosen = chosen[:limit] if limit else chosen
 
     return [(rec, nearest[rec.prompt]) for rec in chosen]
-
-
-# --------------------------------------------------------------------------- #
-# Prompt-side cache: Gate 1 + Gate 2 scores *and* timings, shared across SUTs.
-# --------------------------------------------------------------------------- #
-def _cache_key(rule_id: str, prompt: str) -> str:
-    return hashlib.sha1(f"{rule_id}\x00{prompt}".encode()).hexdigest()
-
-
-def load_prompt_side(path: Path) -> dict[str, dict]:
-    """Read the shared prompt-side cache (empty dict when it does not exist)."""
-    if not path.exists():
-        return {}
-    cache: dict[str, dict] = {}
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # truncated final line from an interrupted run
-            cache[entry["k"]] = entry
-    return cache
-
-
-def prompt_side_scores(
-    oracle: TimedOracle,
-    rule: SleecRule,
-    prompt: str,
-    corpus_exploit: float,
-    cache: dict[str, dict],
-    cache_file,
-) -> tuple[PromptScores, float, float | None]:
-    """Gate 1 + Gate 2 for one (rule, prompt), with their latencies.
-
-    Returns ``(PromptScores, gate1_ms, gate2_defeater_entailment_ms)``.
-
-    Gate 1's *score* is the corpus value — the same cached P(A|Q) the ordinary
-    pipeline trusts, and the number this prompt was selected on, so it must not
-    drift. Its *timing* is a real oracle call made purely to measure the gate,
-    which is what the ordinary run recorded too (its results.csv shows a full
-    ~43ms Gate-1 latency on every case even though the score came from cache).
-
-    The whole prompt half depends only on Q, never on a SUT response, so it is
-    computed once and reused by every subsequent SUT via ``cache``.
-    """
-    key = _cache_key(rule.rule_id, prompt)
-    hit = cache.get(key)
-    if hit is not None:
-        defeaters = [
-            DefeaterScore(d.defeater, cached["entailment"], d.consequent, None)
-            for d, cached in zip(rule.defeaters, hit["defeaters"])
-        ]
-        # Gate 2 reports the *strongest* defeater's latency, matching resolve().
-        best = max(hit["defeaters"], key=lambda c: c["entailment"], default=None)
-        gate2_ms = best["entailment_ms"] if best else None
-        return (
-            PromptScores(rule.rule_id, prompt, hit["exploit"], defeaters),
-            hit["exploit_ms"],
-            gate2_ms,
-        )
-
-    # Gate 1: measured for real, scored from the corpus (see docstring).
-    oracle.score(prompt, rule.antecedent)
-    gate1_ms = oracle.ms(prompt, rule.antecedent) or 0.0
-
-    # Gate 2: score_prompt does the defeater calls; exploit is supplied so it
-    # makes no Gate-1 call of its own.
-    scores = score_prompt(oracle, rule, prompt, exploit=corpus_exploit)
-
-    defeater_ms = [oracle.ms(prompt, d.defeater) or 0.0 for d in scores.defeaters]
-    gate2_ms = (
-        max(zip(scores.defeaters, defeater_ms), key=lambda pair: pair[0].entailment)[1]
-        if scores.defeaters
-        else None
-    )
-
-    entry = {
-        "k": key,
-        "exploit": scores.exploit,
-        "exploit_ms": gate1_ms,
-        "defeaters": [
-            {"entailment": d.entailment, "entailment_ms": ms}
-            for d, ms in zip(scores.defeaters, defeater_ms)
-        ],
-    }
-    cache[key] = entry
-    cache_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    cache_file.flush()
-    return scores, gate1_ms, gate2_ms
-
-
-def response_side_ms(
-    oracle: TimedOracle, rule: SleecRule, case: CaseScores
-) -> tuple[float, float | None]:
-    """Gate 3 latencies: P(B|R) always, P(B_D|R) for the strongest defeater.
-
-    A gate that short-circuited (empty response or consequent — see
-    ``_gate3_score``) made no oracle call and costs 0.0 ms.
-    """
-    gate3_b_ms = oracle.ms(case.response, rule.consequent) or 0.0
-
-    best = max(case.defeaters, key=lambda d: d.entailment, default=None)
-    if best is None or best.consequent is None:
-        return gate3_b_ms, None
-    return gate3_b_ms, oracle.ms(case.response, best.consequent) or 0.0
 
 
 def main() -> None:
@@ -310,12 +141,12 @@ def main() -> None:
     parser.add_argument(
         "--no-resume",
         action="store_true",
-        help="Ignore the saved SUT responses and re-query every prompt.",
+        help="Ignore any saved SUT responses and re-query every prompt.",
     )
     args = parser.parse_args()
 
     config = load_config(args.config)
-    thresholds: Thresholds = config.thresholds
+    thresholds = config.thresholds
 
     if args.sut:
         config.sut["type"] = args.sut
@@ -350,27 +181,26 @@ def main() -> None:
     print(
         f"  {len(records)} prompts in corpus -> {len(selected)} below tau_1="
         f"{thresholds.exploit} on every rule "
-        f"({'stratified, ' if args.stratify else ''}nearest-miss first)"
-        f" -> {n_cases} cases.\n"
+        f"({'stratified' if args.stratify else 'nearest-miss first'}) -> {n_cases} cases.\n"
     )
 
     print(f"Loading oracle ({config.oracle_model})...")
-    oracle = TimedOracle(DebertaOracle(model_name=config.oracle_model))
+    oracle = DebertaOracle(model_name=config.oracle_model)
     sut = build_llm(config.sut)
 
     base_dir = args.output_dir or config.output_dir
     out_dir = base_dir / _sut_slug(sut.name)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = base_dir / ".gate_timings" / "prompt_side_below.jsonl"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
     out_csv = out_dir / "results_below_threshold.csv"
 
     print(f"SUT: {sut.name}   thresholds: {vars(thresholds)}")
     print(f"Output: {out_csv}\n")
 
-    # -- Phase A: SUT interaction (reused wholesale; resumable across crashes). --
-    tasks = [
-        (rec.prompt, [(rid, rec.rule_scores.get(rid)) for rid in rids])
+    # -- Phase A: SUT interaction. Its own resume file, so the positive run's
+    # -- responses.jsonl (a different prompt set) is never read or written.
+    tasks: list[ScoringTask] = [
+        (rec.prompt,
+         [(rid, rec.rule_scores.get(rid), rec.rule_score_ms.get(rid)) for rid in rids])
         for rec, rids in selected
     ]
     responses = collect_responses(
@@ -379,60 +209,29 @@ def main() -> None:
         resume_path=None if args.no_resume else out_dir / ".below_threshold_responses.jsonl",
     )
 
-    # -- Phase B/C: score every gate (timed), then resolve at the thresholds. --
-    cache = load_prompt_side(cache_path)
-    if cache:
-        print(f"  prompt-side: {len(cache)} cached entries reused from {cache_path.name}")
+    # -- Phase B: every gate, timed, threshold-free. The prompt half (Gates 1/2)
+    # -- is SUT-independent, so it is cached and the next SUT pays only Gate 3.
+    # -- Its own cache file: these (rule, prompt) pairs are disjoint from the
+    # -- positive run's, so sharing one buys nothing and would rewrite that file.
+    scores = score_responses(
+        oracle,
+        responses,
+        rules_by_id,
+        prompt_scores_path=base_dir / "prompt_scores_below_threshold.jsonl",
+    )
 
-    rows: list[dict] = []
-    with cache_path.open("a", encoding="utf-8") as cache_file:
-        for rec in tqdm(responses, desc="scoring", unit="prompt"):
-            for rule_id in rec.rules:
-                rule = rules_by_id.get(rule_id)
-                if rule is None:
-                    continue
-                oracle.reset()
-
-                scores, gate1_ms, gate2_ms = prompt_side_scores(
-                    oracle,
-                    rule,
-                    rec.prompt,
-                    rec.exploit.get(rule_id, 0.0),
-                    cache,
-                    cache_file,
-                )
-                case = score_response(oracle, rule, scores, rec.response)
-                gate3_b_ms, gate3_bd_ms = response_side_ms(oracle, rule, case)
-
-                result = case.resolve(thresholds)
-                row = _result_row(result)
-                row["gate1_ms"] = gate1_ms
-                row["gate2_ms"] = gate2_ms if result.defeater is not None else None
-                row["gate3_b_ms"] = gate3_b_ms
-                row["gate3_bd_ms"] = (
-                    gate3_bd_ms if result.bd_compliance is not None else None
-                )
-                row["oracle_ms"] = sum(
-                    ms
-                    for ms in (gate1_ms, row["gate2_ms"], gate3_b_ms, row["gate3_bd_ms"])
-                    if ms is not None
-                )
-                rows.append(row)
-
-    # Grouped by rule, like the ordinary results.csv (which flattens per-rule cases).
-    rows.sort(key=lambda r: r["rule_id"])
-    with out_csv.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=RESULT_COLUMNS_TIMED)
-        writer.writeheader()
-        writer.writerows(rows)
+    # -- Phase C: resolve at the config thresholds and write the single CSV.
+    cases_by_rule = resolve_scores(scores, thresholds, rule_ids=list(rules_by_id))
+    cases = [c for rule_cases in cases_by_rule.values() for c in rule_cases]
+    save_results(cases, out_csv)
 
     verdicts: dict[str, int] = {}
-    for row in rows:
-        verdicts[row["verdict"]] = verdicts.get(row["verdict"], 0) + 1
-    total_ms = sum(row["oracle_ms"] for row in rows)
-    print(f"\nWrote {len(rows)} cases -> {out_csv}")
+    for case in cases:
+        verdicts[case.verdict.value] = verdicts.get(case.verdict.value, 0) + 1
+    print(f"\nWrote {len(cases)} cases -> {out_csv}")
     print(f"  verdicts: {verdicts}")
-    print(f"  oracle: {total_ms / 1000:.1f}s total, {total_ms / len(rows):.1f} ms/case")
+    for gate, stats in gate_timings(cases).items():
+        print(f"  {gate}: {stats['mean_ms']:.1f} ms mean over {stats['n_measured']} measured")
 
 
 if __name__ == "__main__":
