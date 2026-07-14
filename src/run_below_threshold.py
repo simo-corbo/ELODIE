@@ -60,7 +60,7 @@ from run_pipeline import _sut_slug
 
 # The positive run's sample size (see any outputs/*/summary.json), so the negative
 # control costs the same number of SUT calls as the run it is compared against.
-DEFAULT_MAX_PROMPTS = 10_000
+DEFAULT_MAX_PROMPTS = 1000
 
 
 def select_below_threshold(
