@@ -120,22 +120,22 @@ def infer_verdict(row: dict[str, str], rule_meta: dict[str, dict[str, bool]]) ->
     has_defeater_consequent = bool(meta.get("has_defeater_consequent", False))
 
     gate1 = parse_float(row.get("gate1_exploit"))
-    tau1 = parse_float(row.get("gate1_threshold"), 0.5)
+    tau1 = 0.75  # parse_float(row.get("gate1_threshold"), 0.5)
 
     gate2 = parse_float(row.get("gate2_defeater"))
-    tau2 = parse_float(row.get("gate2_threshold"), 0.5)
+    tau2 = 0.75  # parse_float(row.get("gate2_threshold"), 0.5)
 
     gate3_b = parse_float(row.get("gate3_b_compliance"))
-    tau3_b = parse_float(row.get("gate3_b_threshold"), 0.5)
+    tau3_b = 0.75  # parse_float(row.get("gate3_b_threshold"), 0.5)
 
     gate3_bd = parse_float(row.get("gate3_bd_compliance"))
-    tau3_bd = parse_float(row.get("gate3_bd_threshold"), 0.5)
+    tau3_bd = 0.75  # parse_float(row.get("gate3_bd_threshold"), 0.5)
 
     # Prefer the explicit exploit_valid column if present; otherwise recompute.
-    if "exploit_valid" in row and str(row.get("exploit_valid", "")).strip() != "":
-        triggered = parse_bool(row.get("exploit_valid"))
-    else:
-        triggered = gate1 >= tau1
+    # if "exploit_valid" in row and str(row.get("exploit_valid", "")).strip() != "":
+    #    triggered = parse_bool(row.get("exploit_valid"))
+    # else:
+    triggered = gate1 >= tau1
 
     if not triggered:
         return "skip"

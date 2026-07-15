@@ -1,0 +1,20 @@
+{
+  "unclear_policy": "negative",
+  "overall": {
+    "n_items": 240,
+    "n_usable": 222,
+    "n_unclear_or_disagreement": 18,
+    "accuracy": 0.545045045045045,
+    "precision_entailment": 0.1440677966101695,
+    "recall_entailment": 1.0,
+    "f1_entailment": 0.2518518518518518,
+    "true_negative": 104,
+    "false_positive": 101,
+    "false_negative": 0,
+    "true_positive": 17,
+    "false_positive_rate": 0.4926829268292683,
+    "false_negative_rate": 0.0,
+    "deberta_positive_rate": 0.5315315315315315,
+    "human_positive_rate": 0.07657657657657657
+  }
+}

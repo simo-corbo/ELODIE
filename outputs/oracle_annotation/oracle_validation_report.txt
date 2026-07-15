@@ -1,0 +1,52 @@
+ELODIE ORACLE VALIDATION REPORT
+================================================================================
+
+Inter-annotator agreement
+--------------------------------------------------------------------------------
+Items with both labels: 240
+Raw exact agreement:    0.925
+Cohen's kappa, 3-way:   0.612
+Cohen's kappa, binary:  0.612
+  Binary kappa maps UNCLEAR to NOT_ENTAILED.
+
+DeBERTa vs human gold, overall
+--------------------------------------------------------------------------------
+n_items                          240
+n_usable                         222
+n_unclear_or_disagreement        18
+accuracy                         0.545
+precision_entailment             0.144
+recall_entailment                1.000
+f1_entailment                    0.252
+false_positive_rate              0.493
+false_negative_rate              0.000
+deberta_positive_rate            0.532
+human_positive_rate              0.077
+true_negative                    104
+false_positive                   101
+false_negative                   0
+true_positive                    17
+
+DeBERTa vs human gold, by gate
+--------------------------------------------------------------------------------
+                  gate n_usable accuracy precision_entailment recall_entailment f1_entailment false_positive_rate false_negative_rate
+         G1_ANTECEDENT       58    0.569                0.074             1.000         0.138               0.446               0.000
+           G2_DEFEATER       51    0.529                0.077             1.000         0.143               0.490               0.000
+    G3_BASE_CONSEQUENT       59    0.644                0.382             1.000         0.553               0.457               0.000
+G3_DEFEATER_CONSEQUENT       54    0.426                0.000             0.000         0.000               0.574                 NaN
+
+DeBERTa vs human gold, by gate and score band
+--------------------------------------------------------------------------------
+                  gate score_band n_usable accuracy precision_entailment recall_entailment f1_entailment
+         G1_ANTECEDENT borderline       20    0.600                0.000             0.000         0.000
+         G1_ANTECEDENT       high       19    0.105                0.105             1.000         0.190
+         G1_ANTECEDENT        low       19    1.000                0.000             0.000         0.000
+           G2_DEFEATER borderline       18    0.444                0.000             0.000         0.000
+           G2_DEFEATER       high       16    0.125                0.125             1.000         0.222
+           G2_DEFEATER        low       17    1.000                0.000             0.000         0.000
+    G3_BASE_CONSEQUENT borderline       20    0.550                0.357             1.000         0.526
+    G3_BASE_CONSEQUENT       high       20    0.400                0.400             1.000         0.571
+    G3_BASE_CONSEQUENT        low       19    1.000                0.000             0.000         0.000
+G3_DEFEATER_CONSEQUENT borderline       17    0.235                0.000             0.000         0.000
+G3_DEFEATER_CONSEQUENT       high       18    0.000                0.000             0.000         0.000
+G3_DEFEATER_CONSEQUENT        low       19    1.000                0.000             0.000         0.000
