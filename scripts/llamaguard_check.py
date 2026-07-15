@@ -33,13 +33,13 @@ import os
 import random
 import re
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS_DIR = REPO_ROOT / "outputs"
@@ -78,6 +78,35 @@ HAZARD_CATEGORIES = {
 # Truncate very long prompts/responses: Llama Guard 3 has an 8k context and a
 # handful of rows in results.csv carry multi-thousand-token reasoning traces.
 MAX_CHARS = 6000
+
+
+# The pipeline writes two result files per model: results.csv (verdicts that
+# cleared the oracle's gate thresholds) and results_below_threshold.csv (the
+# interactions that fell short). We cross-check both together and tag each row
+# with the file it came from via ``source_file``.
+SOURCE_FILES = {
+    "results.csv": "results",
+    "results_below_threshold.csv": "below_threshold",
+}
+
+
+def load_sources(model_dir: Path) -> pd.DataFrame:
+    """Load results.csv and results_below_threshold.csv into one frame.
+
+    Each row keeps its original per-file index (so ``row_index`` stays a
+    pointer back into its source file) and gains a ``source_file`` column
+    identifying which file it came from. results.csv is required; the
+    below-threshold file is included when present.
+    """
+    parts = []
+    for filename, tag in SOURCE_FILES.items():
+        path = model_dir / filename
+        if not path.exists():
+            continue
+        part = pd.read_csv(path)
+        part["source_file"] = tag
+        parts.append(part)
+    return pd.concat(parts)
 
 
 def stratified_sample(df: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
@@ -217,7 +246,14 @@ def check_row(client: GuardClient, row: pd.Series) -> dict:
 
 def order_columns(results: pd.DataFrame) -> pd.DataFrame:
     """Identifiers, then pipeline gates, then Guard verdicts, then the texts."""
-    ident = ["row_index", "rule_id", "elodie_verdict", "lg_verdict", "exploit_valid"]
+    ident = [
+        "row_index",
+        "source_file",
+        "rule_id",
+        "elodie_verdict",
+        "lg_verdict",
+        "exploit_valid",
+    ]
     guard = [c for c in results.columns if c.startswith("lg_") and c != "lg_verdict"]
     texts = ["prompt", "response"]
     gates = [
@@ -293,36 +329,35 @@ def process_model(
         print(f"[skip] {model_dir.name}: {out_csv.name} exists (use --overwrite)")
         return None
 
-    df = pd.read_csv(csv_path)
+    df = load_sources(model_dir)
     sample = stratified_sample(df, args.n, args.seed)
+    src_counts = df["source_file"].value_counts().to_dict()
     print(
         f"[{model_dir.name}] {len(sample)} rows sampled from {len(df)} "
+        f"({', '.join(f'{k}={v}' for k, v in src_counts.items())}) "
         f"across {sample['rule_id'].nunique()} rules; {2 * len(sample)} Guard calls"
     )
 
     rows: list[dict] = []
-    done = 0
-    lock = threading.Lock()
     start = time.perf_counter()
 
     def worker(row: pd.Series) -> dict:
-        nonlocal done
-        result = check_row(client, row)
-        with lock:
-            done += 1
-            if done % 50 == 0 or done == len(sample):
-                rate = done / (time.perf_counter() - start)
-                print(
-                    f"  {model_dir.name}: {done}/{len(sample)} ({rate:.1f} rows/s)",
-                    flush=True,
-                )
-        return result
+        return check_row(client, row)
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        rows = list(pool.map(worker, (row for _, row in sample.iterrows())))
+        rows = list(
+            tqdm(
+                pool.map(worker, (row for _, row in sample.iterrows())),
+                total=len(sample),
+                desc=model_dir.name,
+                unit="row",
+            )
+        )
 
     wall_s = time.perf_counter() - start
-    results = order_columns(pd.DataFrame(rows)).sort_values(["rule_id", "row_index"])
+    results = order_columns(pd.DataFrame(rows)).sort_values(
+        ["rule_id", "source_file", "row_index"]
+    )
     results.to_csv(out_csv, index=False)
 
     summary = summarise(
@@ -331,7 +366,7 @@ def process_model(
         {
             "model_folder": model_dir.name,
             "guard_model": args.model,
-            "source_csv": str(csv_path.relative_to(REPO_ROOT)),
+            "source_files": df["source_file"].value_counts().to_dict(),
             "source_rows": int(len(df)),
             "requested_n": args.n,
             "seed": args.seed,

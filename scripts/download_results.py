@@ -44,7 +44,7 @@ def main() -> None:
     args = parser.parse_args()
 
     load_dotenv(REPO_ROOT / ".env")
-    token = os.getenv("HF_TOKEN")  # optional for public repos
+    token = os.getenv("HF_UPLOAD_TOKEN")  # optional for public repos
 
     api = HfApi(token=token)
     name_prefix = f"{args.namespace}/{args.prefix}-"
