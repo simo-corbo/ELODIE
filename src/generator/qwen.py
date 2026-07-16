@@ -25,7 +25,7 @@ class QwenClient(OpenAICompatibleClient):
             model,
             base_url=base_url,
             api_key=api_key,
-            api_key_env="HF_TOKEN",
+            api_key_env="DEEPSEEK_API_KEY",
             temperature=temperature,
             max_tokens=max_tokens,
             name=name,
