@@ -83,18 +83,10 @@ from elodie.pipeline import (  # noqa: E402
     save_responses,
     summarise_run,
 )
+from elodie.prompt_dataset import GATE1_MAX_LENGTH  # noqa: E402
 from elodie.rules import SleecRule, load_rules  # noqa: E402
 
 PHASES = ("prompt", "corpus", "sut", "resolve")
-
-# Gate 1's scores were precomputed by classify_wildjailbreak.py, which truncates each
-# (prompt, antecedent) pair at 256 tokens. Re-scoring at the model's default 512 instead
-# feeds it prompt text the cached score never saw: on a random sample of 150 stored cases
-# that moved Gate 1 by 0.12 on average and flipped 12% of them across tau_1, versus a mean
-# 6e-4 and one borderline flip when the original 256-token cap is honoured. So Gate 1 is
-# re-measured under the cap it was built with; Gates 2 and 3 keep the model default, which
-# is what the live pipeline scored them at.
-GATE1_MAX_LENGTH = 256
 
 
 def warm_up(oracle, rounds: int = 3) -> None:
