@@ -365,12 +365,19 @@ def process_model(
     df = load_sources(model_dir)
     sample = undersample(df, args.frac, args.seed)
 
+    # Empty/blank SUT responses (the model returned nothing) can't be judged as
+    # a prompt+response conversation, so drop them before classifying.
+    resp = sample["response"]
+    blank = resp.isna() | (resp.astype(str).str.strip() == "")
+    n_blank = int(blank.sum())
+    sample = sample[~blank]
+
     # Dedup: results.csv repeats each (prompt, response) once per rule_id, but
     # Guard's verdict is identical for all of them, so classify each unique pair
     # once (keyed by the truncated text actually sent) and fan the result back
-    # out to every row that shares it.
-    prompts = sample["prompt"].astype(str).str.slice(0, MAX_CHARS)
-    responses = sample["response"].astype(str).str.slice(0, MAX_CHARS)
+    # out to every row that shares it. fillna guards any stray null prompt.
+    prompts = sample["prompt"].fillna("").astype(str).str.slice(0, MAX_CHARS)
+    responses = sample["response"].fillna("").astype(str).str.slice(0, MAX_CHARS)
     keys = [guard_key(args.model, p, r) for p, r in zip(prompts, responses)]
     unique: dict[str, tuple[str, str]] = {}
     for k, p, r in zip(keys, prompts, responses):
@@ -385,6 +392,7 @@ def process_model(
         f"[{model_dir.name}] {len(sample)} rows ({how}) from {len(df)} "
         f"({', '.join(f'{k}={v}' for k, v in src_counts.items())}) "
         f"across {sample['rule_id'].nunique()} rules; "
+        f"skipped {n_blank} empty responses; "
         f"{len(unique)} unique (prompt,response), {len(unique) - len(todo)} cached, "
         f"{len(todo)} Guard calls"
     )
