@@ -12,10 +12,17 @@ boolean plus the hazard-category codes. Latency is recorded for every call, so
 the output doubles as a timing benchmark against the DeBERTa oracle's
 ``*_ms`` columns already present in results.csv.
 
+results.csv repeats each ``(prompt, response)`` once per matched ``rule_id``
+(~13x), so we classify each *unique* pair once and reuse the verdict across
+every row that shares it — ~130k rows collapse to ~10k Guard calls. Each
+verdict is checkpointed to ``llamaguard_cache.jsonl`` the moment it lands, so an
+interrupted run resumes from where it stopped instead of starting over.
+
 Written per model folder:
 
-    llamaguard.csv           one row per sampled interaction (verdicts + ms)
-    llamaguard_summary.json  sampling config, agreement rates, timing stats
+    llamaguard.csv           one row per interaction (verdicts + ms)
+    llamaguard_summary.json  run config, agreement rates, timing stats
+    llamaguard_cache.jsonl   resume checkpoint (one line per unique pair)
 
 Requires ``HF_TOKEN`` in .env (same token used by scripts/upload_results.py).
 
@@ -31,11 +38,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -171,28 +180,48 @@ class GuardClient:
         return "error", [], 0.0, last_error
 
 
-def check_row(client: GuardClient, row: pd.Series) -> dict:
-    """Run the Llama Guard prompt+response pass over one interaction.
+def guard_key(model: str, prompt: str, response: str) -> str:
+    """Content hash of an interaction as actually sent to Guard.
 
-    Every column of the source results.csv row is carried through — the gate
-    scores, their thresholds and per-gate ``*_ms`` timings, plus the prompt and
-    response themselves — so the Guard verdicts can be compared against the
-    pipeline's own gates without joining back to the 130k-row file.
+    results.csv repeats every ``(prompt, response)`` once per matched ``rule_id``
+    (~13x on average), but Llama Guard's verdict depends only on the conversation
+    it sees. Hashing the truncated prompt+response (plus the Guard model, so
+    switching models doesn't reuse stale verdicts) lets us classify each unique
+    pair once and reuse it across every row that shares it.
     """
-    prompt = str(row["prompt"])[:MAX_CHARS]
-    response = str(row["response"])[:MAX_CHARS]
+    h = hashlib.sha1()
+    for part in (model, prompt, response):
+        h.update(part.encode("utf-8", "surrogatepass"))
+        h.update(b"\x00")
+    return h.hexdigest()
 
-    r_verdict, r_codes, r_ms, r_raw = client.classify(
+
+def classify_pair(client: GuardClient, prompt: str, response: str) -> dict:
+    """Classify one (already-truncated) prompt+response pair."""
+    verdict, codes, ms, raw = client.classify(
         [
             {"role": "user", "content": prompt},
             {"role": "assistant", "content": response},
         ]
     )
+    return {"verdict": verdict, "codes": codes, "ms": round(ms, 3), "raw": raw}
 
+
+def build_row(row: pd.Series, result: dict) -> dict:
+    """Attach a Guard ``result`` to one source row.
+
+    Every column of the source results.csv row is carried through — the gate
+    scores, their thresholds and per-gate ``*_ms`` timings, plus the prompt and
+    response themselves — so the Guard verdicts can be compared against the
+    pipeline's own gates without joining back to the 130k-row file. Rows that
+    share a (prompt, response) pair receive the same ``result``.
+    """
     source = row.to_dict()
     # Renamed to keep the pipeline's verdict distinguishable from lg_verdict.
     source["elodie_verdict"] = source.pop("verdict")
 
+    r_verdict = result["verdict"]
+    r_codes = result["codes"]
     return {
         "row_index": int(row.name),
         **source,
@@ -201,7 +230,7 @@ def check_row(client: GuardClient, row: pd.Series) -> dict:
         "lg_response_categories": ",".join(
             HAZARD_CATEGORIES.get(c, c) for c in r_codes
         ),
-        "lg_response_ms": round(r_ms, 3),
+        "lg_response_ms": round(result["ms"], 3),
         # Llama Guard's analogue of the pipeline verdict: an unsafe assistant
         # turn means the SUT complied with the attack.
         "lg_verdict": (
@@ -209,8 +238,49 @@ def check_row(client: GuardClient, row: pd.Series) -> dict:
             if r_verdict == "unsafe"
             else ("compliant" if r_verdict == "safe" else "error")
         ),
-        "lg_response_raw": r_raw,
+        "lg_response_raw": result["raw"],
     }
+
+
+def load_cache(path: Path) -> dict[str, dict]:
+    """Load previously-computed verdicts, keyed by ``guard_key``.
+
+    Tolerates a torn final line from a hard kill so an interrupted run is always
+    resumable. Only successful verdicts are ever written here, so a rerun retries
+    anything that errored.
+    """
+    cache: dict[str, dict] = {}
+    if not path.exists():
+        return cache
+    with path.open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # partial trailing write from an interrupt; skip it
+            cache[rec["key"]] = rec["result"]
+    return cache
+
+
+class CacheWriter:
+    """Append-only, fsync'd, thread-safe checkpoint of Guard verdicts."""
+
+    def __init__(self, path: Path) -> None:
+        self._fh = path.open("a")
+        self._lock = threading.Lock()
+
+    def append(self, key: str, result: dict) -> None:
+        line = json.dumps({"key": key, "result": result})
+        with self._lock:
+            self._fh.write(line + "\n")
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+
+    def close(self) -> None:
+        self._fh.close()
 
 
 def order_columns(results: pd.DataFrame) -> pd.DataFrame:
@@ -286,6 +356,7 @@ def process_model(
 ) -> dict | None:
     out_csv = model_dir / "llamaguard.csv"
     out_json = model_dir / "llamaguard_summary.json"
+    cache_path = model_dir / "llamaguard_cache.jsonl"
 
     if out_csv.exists() and not args.overwrite:
         print(f"[skip] {model_dir.name}: {out_csv.name} exists (use --overwrite)")
@@ -293,31 +364,56 @@ def process_model(
 
     df = load_sources(model_dir)
     sample = undersample(df, args.frac, args.seed)
+
+    # Dedup: results.csv repeats each (prompt, response) once per rule_id, but
+    # Guard's verdict is identical for all of them, so classify each unique pair
+    # once (keyed by the truncated text actually sent) and fan the result back
+    # out to every row that shares it.
+    prompts = sample["prompt"].astype(str).str.slice(0, MAX_CHARS)
+    responses = sample["response"].astype(str).str.slice(0, MAX_CHARS)
+    keys = [guard_key(args.model, p, r) for p, r in zip(prompts, responses)]
+    unique: dict[str, tuple[str, str]] = {}
+    for k, p, r in zip(keys, prompts, responses):
+        unique.setdefault(k, (p, r))
+
+    # Resume: skip pairs already checkpointed by an earlier (interrupted) run.
+    cache = load_cache(cache_path)
+    todo = [k for k in unique if k not in cache]
     src_counts = sample["source_file"].value_counts().to_dict()
     how = "all rows" if not args.frac or args.frac >= 1.0 else f"frac={args.frac}"
     print(
         f"[{model_dir.name}] {len(sample)} rows ({how}) from {len(df)} "
         f"({', '.join(f'{k}={v}' for k, v in src_counts.items())}) "
-        f"across {sample['rule_id'].nunique()} rules; {len(sample)} Guard calls"
+        f"across {sample['rule_id'].nunique()} rules; "
+        f"{len(unique)} unique (prompt,response), {len(unique) - len(todo)} cached, "
+        f"{len(todo)} Guard calls"
     )
 
-    rows: list[dict] = []
+    writer = CacheWriter(cache_path)
     start = time.perf_counter()
 
-    def worker(row: pd.Series) -> dict:
-        return check_row(client, row)
+    def worker(key: str) -> tuple[str, dict]:
+        prompt, response = unique[key]
+        result = classify_pair(client, prompt, response)
+        # Persist successes only, so a rerun retries anything that errored.
+        if result["verdict"] != "error":
+            writer.append(key, result)
+        return key, result
 
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        rows = list(
-            tqdm(
-                pool.map(worker, (row for _, row in sample.iterrows())),
-                total=len(sample),
+    try:
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            for key, result in tqdm(
+                pool.map(worker, todo),
+                total=len(todo),
                 desc=model_dir.name,
-                unit="row",
-            )
-        )
+                unit="pair",
+            ):
+                cache[key] = result
+    finally:
+        writer.close()
 
     wall_s = time.perf_counter() - start
+    rows = [build_row(row, cache[k]) for (_, row), k in zip(sample.iterrows(), keys)]
     results = order_columns(pd.DataFrame(rows)).sort_values(
         ["rule_id", "source_file", "row_index"]
     )
