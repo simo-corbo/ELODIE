@@ -28,6 +28,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Gate 1's cached scores were precomputed by classify_wildjailbreak.py, which truncates
+# each (prompt, antecedent) pair at 256 tokens. Anyone *timing* a cached score must call
+# under the same cap: at the model's default 512 the prompt is no longer truncated, so it
+# is a bigger, slower — and different — call than the one that produced the stored score.
+# On a random sample of 150 stored cases, re-scoring at 512 moved Gate 1 by 0.12 on average
+# and flipped 12% across tau_1, versus a mean 6e-4 and one borderline flip at 256. Gates 2
+# and 3 keep the model default, which is what the live pipeline scored them at.
+GATE1_MAX_LENGTH = 256
+
 
 @dataclass(frozen=True)
 class PromptRecord:

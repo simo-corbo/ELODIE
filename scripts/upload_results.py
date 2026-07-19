@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS_DIR = REPO_ROOT / "outputs"
 DEFAULT_NAMESPACE = "simocorbo"
 DEFAULT_PREFIX = "nerobali-results"
-EXCLUDE_FOLDERS = {"wildjailbreak"}
+EXCLUDE_FOLDERS = {"wildjailbreak", ".gate_timings", "oracle_annotation"}
 
 IGNORE_PATTERNS = ["**/__pycache__/*", "**/.DS_Store"]
 
@@ -48,9 +48,9 @@ def main() -> None:
     args = parser.parse_args()
 
     load_dotenv(REPO_ROOT / ".env")
-    token = os.getenv("HF_TOKEN")
+    token = os.getenv("HF_UPLOAD_TOKEN")
     if not token:
-        raise SystemExit("HF_TOKEN not found in environment/.env")
+        raise SystemExit("HF_UPLOAD_TOKEN not found in environment/.env")
 
     if not OUTPUTS_DIR.is_dir():
         raise SystemExit(f"outputs directory not found: {OUTPUTS_DIR}")

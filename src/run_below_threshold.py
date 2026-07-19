@@ -13,10 +13,15 @@ measures is Gate 3 — does the SUT still answer safely when the prompt was neve
 adversarial? — and the per-gate latencies, which are directly comparable to the
 positive run's because they come from the very same code.
 
-Nothing here re-implements the pipeline. Selection is the only new logic; Phase A
-(``collect_responses``), Phase B (``score_responses``) and Phase C
-(``resolve_scores``) are the pipeline's own, so a case is scored, timed and
-resolved by exactly the code that produced ``results.csv``.
+Nothing here re-implements the pipeline. Selection and Gate-1 timing are the only
+new logic; Phase A (``collect_responses``), Phase B (``score_responses``) and
+Phase C (``resolve_scores``) are the pipeline's own, so a case is scored, timed
+and resolved by exactly the code that produced ``results.csv``.
+
+Gate 1 is timed here rather than read from the corpus (see ``measure_gate1_ms``):
+the corpus only carries latencies for pairs the *positive* run scored, and these
+pairs are disjoint from those by construction, so its Gate-1 timings are absent.
+The measured call's score is discarded — every score still comes from the corpus.
 
 Output — one CSV, the same columns as ``results.csv``, in the SUT's own folder:
 
@@ -32,19 +37,21 @@ Alongside it, two caches make a rerun (and the next SUT) cheap:
 Usage:
     python run_below_threshold.py                                  # config's SUT
     python run_below_threshold.py --sut qwen --sut-model Qwen/Qwen3-32B:groq
-    python run_below_threshold.py --max-prompts 10000 --stratify   # balanced sample
+    python run_below_threshold.py --max-prompts 10000              # bigger sample
     python run_below_threshold.py --rules-per-prompt 3             # 3 nearest misses
 """
 
 from __future__ import annotations
 
 import argparse
+import random
 from pathlib import Path
 
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 from elodie.config import DEFAULT_CONFIG_PATH, load_config
-from elodie.evaluation import save_results
+from elodie.evaluation import load_prompt_scores, save_results
 from elodie.oracle import DebertaOracle
 from elodie.pipeline import (
     ScoringTask,
@@ -53,14 +60,70 @@ from elodie.pipeline import (
     resolve_scores,
     score_responses,
 )
-from elodie.prompt_dataset import PromptRecord, _stratified_sample, load_prompt_records
-from elodie.rules import get_rule, load_rules
+from elodie.prompt_dataset import GATE1_MAX_LENGTH, PromptRecord, load_prompt_records
+from elodie.rules import SleecRule, get_rule, load_rules
 from generator import build_llm
 from run_pipeline import _sut_slug
 
 # The positive run's sample size (see any outputs/*/summary.json), so the negative
 # control costs the same number of SUT calls as the run it is compared against.
-DEFAULT_MAX_PROMPTS = 1000
+DEFAULT_MAX_PROMPTS = 2000
+
+# Strata for the sample: equal-width bands of the eligible score range [0, tau_1).
+DEFAULT_SCORE_BANDS = 10
+DEFAULT_SEED = 0
+
+
+def _score_band(score: float, threshold: float, bands: int) -> int:
+    """Index of the equal-width band of ``[0, threshold)`` that ``score`` falls in."""
+    if threshold <= 0.0:
+        return 0
+    return min(max(int(score / threshold * bands), 0), bands - 1)
+
+
+def _stratified_by_score_band(
+    assigned: list[tuple[str, float, PromptRecord]],
+    limit: int,
+    threshold: float,
+    *,
+    bands: int,
+    seed: int,
+) -> list[PromptRecord]:
+    """Draw ``limit`` prompts stratified over the nearest-miss score bands.
+
+    Each band's quota is its share of the eligible population (proportional
+    allocation, largest remainder), so the sample keeps the shape of the
+    below-threshold score distribution instead of piling up just under tau_1.
+    A band holding fewer prompts than its quota hands the shortfall back, filled
+    round-robin by the bands that still have room. Within a band the draw is
+    uniform at random, seeded, so a rerun reproduces the sample exactly.
+    """
+    buckets: dict[int, list[PromptRecord]] = {}
+    for _, score, rec in assigned:
+        buckets.setdefault(_score_band(score, threshold, bands), []).append(rec)
+
+    rng = random.Random(seed)
+    order = sorted(buckets)
+    for band in order:
+        rng.shuffle(buckets[band])
+
+    exact = {b: len(buckets[b]) * limit / len(assigned) for b in order}
+    quota = {b: int(exact[b]) for b in order}
+    remainder = sorted(order, key=lambda b: (-(exact[b] - quota[b]), b))
+    for band in remainder[: limit - sum(quota.values())]:
+        quota[band] += 1
+
+    taken = {b: min(quota[b], len(buckets[b])) for b in order}
+    while sum(taken.values()) < limit:
+        room = [b for b in order if taken[b] < len(buckets[b])]
+        if not room:
+            break
+        for band in room:
+            if sum(taken.values()) >= limit:
+                break
+            taken[band] += 1
+
+    return [rec for band in order for rec in buckets[band][: taken[band]]]
 
 
 def select_below_threshold(
@@ -69,8 +132,9 @@ def select_below_threshold(
     rule_ids: list[str],
     *,
     limit: int | None = None,
-    stratify: bool = False,
     rules_per_prompt: int = 1,
+    bands: int = DEFAULT_SCORE_BANDS,
+    seed: int = DEFAULT_SEED,
 ) -> list[tuple[PromptRecord, list[str]]]:
     """Pick prompts that trigger **no** rule, each paired with its nearest misses.
 
@@ -79,16 +143,17 @@ def select_below_threshold(
     assigned to the ``rules_per_prompt`` rules it scores highest on (all still
     below tau_1), mirroring the ordinary run's argmax assignment.
 
-    Ordering mirrors it too: strongest-scoring first, so a cap keeps the prompts
-    sitting just under the threshold — the hardest negatives, the ones the corpus
-    came closest to counting as exploits. ``stratify`` instead fills the cap
-    round-robin across the nearest-miss rules, for a sample balanced over rules
-    rather than dominated by whichever rules own the closest calls.
+    A cap is filled by *stratified sampling* over the nearest-miss score: the
+    eligible range ``[0, tau_1)`` is cut into ``bands`` equal-width strata and
+    each contributes in proportion to its size, drawn at random under ``seed``.
+    The sample therefore spans the below-threshold distribution — easy negatives
+    as well as hard ones — rather than collapsing onto the prompts sitting just
+    under the threshold, which is what taking the top of a descending sort gives.
     """
     targets = set(rule_ids)
 
-    # (nearest_rule, its_score, record) — the shape _stratified_sample expects.
-    assigned: list[tuple[str | None, float, PromptRecord]] = []
+    # (nearest_rule, its_score, record) — the shape _stratified_by_score_band expects.
+    assigned: list[tuple[str, float, PromptRecord]] = []
     nearest: dict[str, list[str]] = {}
     for rec in records:
         scores = {rid: s for rid, s in rec.rule_scores.items() if rid in targets}
@@ -99,14 +164,56 @@ def select_below_threshold(
         assigned.append((top[0], scores[top[0]], rec))
         nearest[rec.prompt] = top
 
-    if stratify and limit:
-        chosen = _stratified_sample(assigned, limit)
+    if limit and limit < len(assigned):
+        chosen = _stratified_by_score_band(
+            assigned, limit, threshold, bands=bands, seed=seed
+        )
     else:
-        assigned.sort(key=lambda t: t[1], reverse=True)
         chosen = [rec for _, _, rec in assigned]
-        chosen = chosen[:limit] if limit else chosen
 
     return [(rec, nearest[rec.prompt]) for rec in chosen]
+
+
+def measure_gate1_ms(
+    oracle: DebertaOracle,
+    selected: list[tuple[PromptRecord, list[str]]],
+    rules_by_id: dict[str, SleecRule],
+    *,
+    cache_path: Path | None = None,
+) -> dict[tuple[str, str], float]:
+    """Time Gate 1 for each selected (rule, prompt) pair, keeping the corpus score.
+
+    The corpus carries a Gate-1 *score* for every pair but a *latency* for almost
+    none: ``patch_gate_timings.py`` back-fills timings only for the pairs the
+    positive run scored, and a below-threshold pair is by construction one no
+    positive run ever touches. Left alone, every row here reports ``gate1_ms``
+    empty and the control's Gate-1 cost cannot be compared to the positive run's
+    — the one comparison the control exists to make.
+
+    Each call is made **purely to time it and its score is discarded**: the value
+    that reaches the results is always the corpus's, so no selection, score or
+    verdict can move. That is the same contract — and the same 256-token cap —
+    as ``patch_gate_timings.py``. Pairs already timed in ``cache_path`` (an
+    earlier SUT over the same sample) are reused, so only the first SUT pays.
+    """
+    known: dict[tuple[str, str], float] = {}
+    if cache_path is not None and Path(cache_path).exists():
+        known = {(ps.rule_id, ps.prompt): ps.exploit_ms
+                 for ps in load_prompt_scores(cache_path)
+                 if ps.exploit_ms is not None}
+
+    todo = [(rid, rec.prompt)
+            for rec, rids in selected
+            for rid in rids
+            if rid in rules_by_id and (rid, rec.prompt) not in known]
+
+    out = dict(known)
+    for rid, prompt in tqdm(todo, desc="gate 1 (timing)", unit="call",
+                            smoothing=0.02, dynamic_ncols=True, disable=not todo):
+        _, ms = oracle.score_timed(prompt, rules_by_id[rid].antecedent,
+                                   max_length=GATE1_MAX_LENGTH)
+        out[(rid, prompt)] = ms  # the score itself is deliberately discarded
+    return out
 
 
 def main() -> None:
@@ -123,14 +230,22 @@ def main() -> None:
         "--max-prompts",
         type=int,
         default=DEFAULT_MAX_PROMPTS,
-        help=f"Cap prompts tested, nearest-miss first (default: {DEFAULT_MAX_PROMPTS}; "
-             "0 = every below-threshold prompt in the corpus).",
+        help=f"Cap prompts tested, sampled stratified by nearest-miss score band "
+             f"(default: {DEFAULT_MAX_PROMPTS}; 0 = every below-threshold prompt "
+             "in the corpus).",
     )
     parser.add_argument(
-        "--stratify",
-        action="store_true",
-        help="Fill the cap round-robin across nearest-miss rules instead of taking "
-             "the globally closest-to-threshold prompts.",
+        "--score-bands",
+        type=int,
+        default=DEFAULT_SCORE_BANDS,
+        help=f"Equal-width strata over [0, tau_1) to sample across "
+             f"(default: {DEFAULT_SCORE_BANDS}).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help=f"Seed for the within-band draw (default: {DEFAULT_SEED}).",
     )
     parser.add_argument(
         "--rules-per-prompt",
@@ -142,6 +257,12 @@ def main() -> None:
         "--no-resume",
         action="store_true",
         help="Ignore any saved SUT responses and re-query every prompt.",
+    )
+    parser.add_argument(
+        "--no-gate1-timing",
+        action="store_true",
+        help="Skip timing Gate 1 (leaves gate1_ms empty, as the corpus has no latency "
+             "for below-threshold pairs). Scores are unaffected either way.",
     )
     args = parser.parse_args()
 
@@ -171,8 +292,9 @@ def main() -> None:
         thresholds.exploit,
         list(rules_by_id),
         limit=args.max_prompts or None,
-        stratify=args.stratify,
         rules_per_prompt=args.rules_per_prompt,
+        bands=args.score_bands,
+        seed=args.seed,
     )
     if not selected:
         parser.error("no below-threshold prompts found — is tau_1 set sensibly?")
@@ -181,7 +303,8 @@ def main() -> None:
     print(
         f"  {len(records)} prompts in corpus -> {len(selected)} below tau_1="
         f"{thresholds.exploit} on every rule "
-        f"({'stratified' if args.stratify else 'nearest-miss first'}) -> {n_cases} cases.\n"
+        f"(stratified over {args.score_bands} score bands, seed {args.seed}) "
+        f"-> {n_cases} cases.\n"
     )
 
     print(f"Loading oracle ({config.oracle_model})...")
@@ -196,11 +319,19 @@ def main() -> None:
     print(f"SUT: {sut.name}   thresholds: {vars(thresholds)}")
     print(f"Output: {out_csv}\n")
 
+    # -- Gate-1 latency. The corpus has none for these pairs, so it is measured
+    # -- here (scores discarded) and carried into the run like any cached timing.
+    prompt_scores_path = base_dir / "prompt_scores_below_threshold.jsonl"
+    gate1_ms: dict[tuple[str, str], float] = {}
+    if not args.no_gate1_timing:
+        gate1_ms = measure_gate1_ms(oracle, selected, rules_by_id,
+                                    cache_path=prompt_scores_path)
+
     # -- Phase A: SUT interaction. Its own resume file, so the positive run's
     # -- responses.jsonl (a different prompt set) is never read or written.
     tasks: list[ScoringTask] = [
         (rec.prompt,
-         [(rid, rec.rule_scores.get(rid), rec.rule_score_ms.get(rid)) for rid in rids])
+         [(rid, rec.rule_scores.get(rid), gate1_ms.get((rid, rec.prompt))) for rid in rids])
         for rec, rids in selected
     ]
     responses = collect_responses(
@@ -217,7 +348,7 @@ def main() -> None:
         oracle,
         responses,
         rules_by_id,
-        prompt_scores_path=base_dir / "prompt_scores_below_threshold.jsonl",
+        prompt_scores_path=prompt_scores_path,
     )
 
     # -- Phase C: resolve at the config thresholds and write the single CSV.

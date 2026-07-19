@@ -12,7 +12,7 @@ class DeepSeekClient(OpenAICompatibleClient):
 
     def __init__(
         self,
-        model="deepseek-ai/DeepSeek-V3.2:fastest",
+        model="deepseek-ai/DeepSeek-V4-Flash:fastest",
         api_key: str | None = None,
         base_url: str = DEEPSEEK_BASE_URL,
         temperature: float = 1,
