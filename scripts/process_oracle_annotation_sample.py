@@ -646,10 +646,10 @@ def latex_threshold_sweep_accuracy_by_gate(sweep_df: pd.DataFrame) -> str:
 
 
 def main() -> None:
-    master_path = Path("../outputs/oracle_annotation/annotation_sample_master.csv")
-    annotator_a_path = Path("../outputs/oracle_annotation/annotation_sample_annotator_A.csv")
-    annotator_b_path = Path("../outputs/oracle_annotation/annotation_sample_annotator_B.csv")
-    output_path = Path("../outputs/oracle_annotation/")
+    master_path = Path("../plots/oracle_annotation/annotation_sample_master.csv")
+    annotator_a_path = Path("../plots/oracle_annotation/annotation_sample_annotator_A.csv")
+    annotator_b_path = Path("../plots/oracle_annotation/annotation_sample_annotator_B.csv")
+    output_path = Path("../plots/oracle_annotation/")
     unclear_policy = "negative"
 
     df = load_data(master_path, annotator_a_path, annotator_b_path)

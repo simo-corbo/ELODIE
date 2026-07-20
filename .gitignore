@@ -15,5 +15,5 @@
 /outputs/wildjailbreak/*.json
 /outputs/prompt_scores.jsonl
 /outputs/wildjailbreak/wildjailbreak_category_scores_entail.json
-/outputs/oracle_annotation/annotation_sample_annotator_A.numbers
+/plots/oracle_annotation/annotation_sample_annotator_A.numbers
 /scripts/run_openai_moderation.py
