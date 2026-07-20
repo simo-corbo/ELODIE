@@ -30,7 +30,7 @@ The reported evaluation uses `tau = 0.9` for all gates, selected after the RQ1 t
 
 The study contains 35 SLEEC rules derived from public provider policies, 12,000 prompts sampled from WildJailbreak, and five LUTs.
 
-The package contains `data/sleec_rules.json`, the RQ1 annotation and oracle-validation materials, the RQ2 and RQ3 notebooks under `notebooks/`, and one result directory per LUT under `outputs/<lut>/`. Generated evaluation artifacts are written to `outputs/rq1/`, `outputs/rq2/`, and `outputs/rq3/`.
+The package contains `data/sleec_rules.json`, the RQ1 annotation and oracle-validation materials, the RQ2 and RQ3 notebooks under `notebooks/`, and one result directory per LUT under `outputs/<lut>/`. Generated evaluation artifacts are written to `plots/rq1/`, `plots/rq2/`, and `plots/rq3/`.
 
 For each LUT:
 
